@@ -1057,5 +1057,132 @@ class TestFrontendBadMarks(unittest.TestCase):
         self.assertIn("bad move 解析失败", body)
 
 
+class TestSubmitLifecycle(unittest.TestCase):
+    """第六轮审计（人机验证/空白浏览器）的回归点。
+
+    这几条都是「改了会悄悄退回去」的东西：浏览器选型、阶段映射、
+    人工验证期间不刷新挑战、token 只认 reviewForm、EXE 与脚本版本对上。
+    """
+
+    def test_stage_mapping(self):
+        self.assertEqual(M.submit_stage_of("NEED_MANUAL 请点一下"), "AWAITING_VERIFICATION")
+        self.assertEqual(M.submit_stage_of("VERIFICATION_TIMEOUT 300"), "AWAITING_VERIFICATION")
+        self.assertEqual(M.submit_stage_of("TOKEN_OK len=709"), "SUBMITTING")
+        self.assertEqual(M.submit_stage_of("REPORT https://x"), "DOWNLOADING")
+        self.assertEqual(M.submit_stage_of("wait 30s https://x/progress?task=1"), "SCORING")
+        self.assertIsNone(M.submit_stage_of("AT_HOME https://mjai.ekyu.moe/"))
+
+    def test_system_chrome_wins_over_bundled(self):
+        """full 包内带 Chromium 时也要先用系统正式版：换内核不该由用户承担。"""
+        import unittest.mock as mock
+        with mock.patch.dict(M.CONFIG, {"chrome": ""}), \
+                mock.patch.dict(os.environ, {"MORTAL_COACH_CHROME": ""}), \
+                mock.patch.object(M, "CHROME_CANDIDATES",
+                                  [r"C:\Program Files\Google\Chrome\Application\chrome.exe"]), \
+                mock.patch.object(M, "bundled_chrome",
+                                  return_value=r"C:\app\runtime\chromium\chrome.exe"), \
+                mock.patch.object(M.Path, "exists", return_value=True):
+            got = M.find_chrome()
+        self.assertIn("Program Files", got)
+
+    def test_build_id_is_ascii(self):
+        b = M.build_id()
+        self.assertTrue(b.startswith("source ") or b.startswith("exe "), b)
+        b.encode("ascii")          # --selftest 在 cmd 里必须不乱码
+
+    def test_python_and_js_build_match(self):
+        import re as _re
+        js = (BASE / "tools" / "submit_auto.mjs").read_text(encoding="utf-8")
+        m = _re.search(r"const BUILD = (\d+)", js)
+        self.assertIsNotNone(m)
+        self.assertEqual(int(m.group(1)), M.SUBMIT_BUILD)
+
+    def test_manual_wait_never_refreshes_challenge(self):
+        """人工验证期间刷新 = 把用户正在做的验证重置掉，绝不能有。"""
+        js = (BASE / "tools" / "submit_auto.mjs").read_text(encoding="utf-8")
+        manual = js.split("if (SHOW) {", 1)[1].split("// 无人值守", 1)[0]
+        self.assertNotIn("Page.navigate", manual)
+        self.assertIn("VERIFICATION_PENDING", js)
+
+    def test_token_scoped_to_review_form(self):
+        js = (BASE / "tools" / "submit_auto.mjs").read_text(encoding="utf-8")
+        body = js.split("const readToken", 1)[1][:400]
+        self.assertIn("document.forms.reviewForm", body)
+
+    def test_browser_ready_requires_page_target(self):
+        src = (BASE / "app" / "main.py").read_text(encoding="utf-8")
+        self.assertIn("PAGE_READY", src)
+        self.assertIn("BROWSER_START_FAILED", src)
+        self.assertIn("PAGE_LOAD_FAILED", src)
+
+
+class TestChromeSelection(unittest.TestCase):
+    """浏览器选型：用户指定 > 系统正式版 > full 包内 Chromium，来源要说清楚。"""
+
+    def _touch(self, d, name):
+        p = Path(d) / name
+        p.write_text("x", encoding="utf-8")
+        return str(p)
+
+    def _env_clean(self):
+        os.environ.pop("MORTAL_COACH_CHROME", None)
+
+    def test_order_settings_system_bundled(self):
+        with tempfile.TemporaryDirectory() as d:
+            user = self._touch(d, "user.exe")
+            sysc = self._touch(d, "sys.exe")
+            bun = self._touch(d, "bun.exe")
+            with unittest.mock.patch.object(M, "CONFIG", {"chrome": user}), \
+                 unittest.mock.patch.object(M, "CHROME_CANDIDATES", [sysc]), \
+                 unittest.mock.patch.object(M, "bundled_chrome", return_value=bun):
+                self._env_clean()
+                rows = M.chrome_candidates()
+                self.assertEqual([src for _, src in rows][:3],
+                                 ["settings", "system", "bundled"])
+                self.assertEqual(M.find_chrome(), user)
+                self.assertEqual(M.CHROME_SOURCE, "settings")
+
+    def test_system_before_bundled(self):
+        with tempfile.TemporaryDirectory() as d:
+            sysc = self._touch(d, "sys.exe")
+            bun = self._touch(d, "bun.exe")
+            with unittest.mock.patch.object(M, "CONFIG", {}), \
+                 unittest.mock.patch.object(M, "CHROME_CANDIDATES", [sysc]), \
+                 unittest.mock.patch.object(M, "bundled_chrome", return_value=bun):
+                self._env_clean()
+                self.assertEqual(M.find_chrome(), sysc)
+                self.assertEqual(M.CHROME_SOURCE, "system")
+
+    def test_bundled_is_last_resort(self):
+        with tempfile.TemporaryDirectory() as d:
+            bun = self._touch(d, "bun.exe")
+            with unittest.mock.patch.object(M, "CONFIG", {}), \
+                 unittest.mock.patch.object(M, "CHROME_CANDIDATES", []), \
+                 unittest.mock.patch.object(M, "bundled_chrome", return_value=bun), \
+                 unittest.mock.patch.object(M, "_chrome_from_registry", create=True,
+                                            return_value=""):
+                self._env_clean()
+                self.assertEqual(M.find_chrome(), bun)
+                self.assertEqual(M.CHROME_SOURCE, "bundled")
+
+    def test_dedup_same_path(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = self._touch(d, "same.exe")
+            with unittest.mock.patch.object(M, "CONFIG", {"chrome": p}), \
+                 unittest.mock.patch.object(M, "CHROME_CANDIDATES", [p]), \
+                 unittest.mock.patch.object(M, "bundled_chrome", return_value=p):
+                self._env_clean()
+                rows = M.chrome_candidates()
+                self.assertEqual(len([r for r in rows if r[0] == p]), 1)
+
+    def test_missing_paths_ignored(self):
+        with unittest.mock.patch.object(M, "CONFIG", {"chrome": "Z:/nope/none.exe"}), \
+             unittest.mock.patch.object(M, "CHROME_CANDIDATES", []), \
+             unittest.mock.patch.object(M, "bundled_chrome", return_value=""):
+            self._env_clean()
+            rows = M.chrome_candidates()
+            self.assertNotIn("Z:/nope/none.exe", [p for p, _ in rows])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

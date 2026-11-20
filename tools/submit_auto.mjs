@@ -14,8 +14,10 @@
 //   NO_PAGE / NO_TOKEN / NO_FORM / NO_REPORT_URL / REPORT_TIMEOUT / REPORT_URL
 //   EXC     | ...            Runtime.evaluate 抛异常
 // 退出码：0 成功或 dry 完成 / 1 无页面 / 2 无 token / 3 填表异常 / 4 未拿到报告页
+const BUILD = 4;   // 与 app/main.py 的 SUBMIT_BUILD 必须一致；Python 会核对
 const PORT = process.env.CDP_PORT || 9222;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+console.log('SCRIPT_BUILD', BUILD);
 
 const argv = process.argv.slice(2);
 let cfg = {};
@@ -31,6 +33,12 @@ const SEAT = (cfg.seat === 0 || cfg.seat) ? String(cfg.seat) : '';
 const KYOKUS = (cfg.kyokus || '').trim();
 const TEMP = (cfg.tempo || '').trim();
 const DRY = process.env.MC_DRY === '1' || !!cfg.dry;
+// 设置里勾了「显示浏览器窗口」：一进来就把窗口摆到屏幕正面，让用户能自己点验证码。
+// （窗口没被隐藏是前提 —— Python 那边给 Chrome 传 SW_HIDE 的话，这里搬也白搬）
+const SHOW = !!cfg.show;
+// 继续等待：浏览器和页面都还是上一轮那个，不要重新导航（会把挑战重建一次，
+// 用户刚做的一半白费）。此时只等 token，拿到就直接接着提交。
+const RESUME = !!cfg.resume;
 const HOME = 'https://mjai.ekyu.moe/';
 
 // 最多试 3 轮。实测同一个雀魂链接偶尔会被 Mortal 判成
@@ -58,8 +66,13 @@ const FIELD = {
 import { isReportUrl } from './url_rules.mjs';
 
 const list = await (await fetch(`http://127.0.0.1:${PORT}/json/list`)).json();
-const page = list.filter((t) => t.type === 'page').find((p) => p.url.includes('mjai.ekyu.moe'));
-if (!page) { console.log('NO_PAGE'); process.exit(1); }
+const pages = list.filter((t) => t.type === 'page');
+// 优先已经停在 Mortal 的标签页；没有就用现成的空白页（gotoHome 会导过去）。
+// 以前这里是「找不到 mjai 页面就直接 NO_PAGE」，而浏览器刚启动时页面可能还停在
+// about:blank —— 于是连导航的机会都没有，用户只看到「没有页面」。
+const page = pages.find((p) => p.url.includes('mjai.ekyu.moe')) || pages[0];
+if (!page) { console.log('NO_PAGE', 'no_page_target'); process.exit(1); }
+console.log('PAGE_TARGET', (page.url || '').slice(0, 80));
 const ws = new WebSocket(page.webSocketDebuggerUrl);
 let id = 1; const pend = new Map();
 ws.onmessage = (ev) => {
@@ -110,10 +123,26 @@ async function gotoHome() {
     console.log('NO_PAGE', String(e && e.message || e));
     return false;
   }
-  await sleep(4500);
-  console.log('AT_HOME', await ev('location.href'));
-  console.log('PAGE_STATE', JSON.stringify(await pageState()));
-  return true;
+  // 「导航发出去了」不等于「页面就绪」：以前固定 sleep 4.5 秒就假定好了，
+  // 网络慢或拿到空白文档时，后面每一步都在空页面上跑。这里等到真的出现表单。
+  let last = null;
+  for (let i = 0; i < 24; i++) {
+    await sleep(600);
+    last = await pageState();
+    if (last && last.form) {
+      console.log('AT_HOME', last.url);
+      console.log('PAGE_STATE', JSON.stringify(last));
+      return true;
+    }
+    if (last && last.ready === 'complete' && i >= 6 && !last.form && !last.widget) break;
+  }
+  console.log('AT_HOME', (last && last.url) || '');
+  console.log('PAGE_STATE', JSON.stringify(last || {}));
+  console.log('PAGE_LOAD_FAILED', JSON.stringify({
+    url: (last && last.url) || '', ready: last && last.ready,
+    form: !!(last && last.form), cf: !!(last && last.cf), api: last && last.api,
+  }));
+  return false;
 }
 
 // ---------------- 拿 Turnstile token ----------------
@@ -132,34 +161,66 @@ async function pageState() {
     try { const b = w && w.getBoundingClientRect(); if (b && b.width) {
       box = [Math.round(b.x), Math.round(b.y), Math.round(b.width), Math.round(b.height)]; } } catch (e) {}
     const els = [...document.querySelectorAll('[name="cf-turnstile-response"]')];
+    // 官网首页有 review 和 bot 两套独立控件。只有 reviewForm 里那个响应用于
+    // 「提交牌谱」，拿另一个表单的响应当提交凭证只会换来 invalid captcha response。
+    const rf = document.forms.reviewForm;
+    const rels = rf ? [...rf.querySelectorAll('[name="cf-turnstile-response"]')] : [];
     return JSON.stringify({
       url: location.href,
       title: (document.title || '').slice(0, 40),
       ready: document.readyState,
-      form: !!document.forms.reviewForm,
+      form: !!rf,
       widget: !!w, box: box,
       token: els.length, tlen: els.map((e) => (e.value || '').length).join(','),
+      rtoken: rels.length, rtlen: rels.map((e) => (e.value || '').length).join(','),
       api: typeof window.turnstile,
       cf: [...document.scripts].some((s) => (s.src || '').includes('challenges.cloudflare.com')),
       vis: document.visibilityState,
+      sw: window.innerWidth, sh: window.innerHeight,
+      ifr: (() => {
+        const f = w && w.querySelector('iframe');
+        if (!f) return null;
+        const b = f.getBoundingClientRect();
+        return [Math.round(b.x), Math.round(b.y), Math.round(b.width), Math.round(b.height)];
+      })(),
     });
   })()`);
   try { return JSON.parse(raw); } catch { return { bad: String(raw).slice(0, 120) }; }
 }
 
+// 把验证框滚进视口。**页面用了平滑滚动，scrollIntoView 之后立刻量会读到旧坐标**
+// —— 之前日志里 box 一直是 y=1194（视口才 667 高），点下去等于点空气，就是这个原因。
+// 所以每滚一次都要等滚动落定再重新量，量到真的在视口里才返回。
+async function bringWidgetIntoView() {
+  const read = `(()=>{const d=document.querySelector('.cf-turnstile, #cf-turnstile, [data-sitekey]');
+    if(!d)return '';const b=d.getBoundingClientRect();
+    return JSON.stringify([b.top,b.left,b.width,b.height,innerHeight]);})()`;
+  for (let i = 0; i < 5; i++) {
+    const r0 = await ev(read);
+    let b0; try { b0 = JSON.parse(r0); } catch { return null; }
+    if (!b0) return null;
+    if (b0[0] >= 0 && b0[0] + b0[3] <= b0[4]) return b0;
+    const y = Math.round(b0[0] + await ev('scrollY')
+                         - Math.max(80, (b0[4] - b0[3]) / 2));
+    await ev(`window.scrollTo(0, ${Math.max(0, y)})`);
+    await sleep(450);
+    const r1 = await ev(read);
+    let b1; try { b1 = JSON.parse(r1); } catch { return null; }
+    if (b1 && b1[0] >= 0 && b1[0] + b1[3] <= b1[4]) return b1;
+  }
+  return null;
+}
+
 async function clickWidget() {
-  const r = await ev(`(()=>{
-    const el = document.querySelector('.cf-turnstile, #cf-turnstile, [data-sitekey]');
-    if (!el) return '';
-    try { el.scrollIntoView({block: 'center'}); } catch (e) {}
-    const b = el.getBoundingClientRect();
-    if (!b.width || !b.height) return '';
-    return JSON.stringify([b.x, b.y, b.width, b.height]);
-  })()`);
-  let b; try { b = JSON.parse(r); } catch { return 'no_widget'; }
-  if (!b || !b[2]) return 'no_widget';
-  // Turnstile 的复选框在 300x65 盒子的左侧，再补一下正中，两处都点
-  const pts = [[b[0] + 28, b[1] + b[3] / 2], [b[0] + b[2] / 2, b[1] + b[3] / 2]];
+  const b = await bringWidgetIntoView();
+  if (!b) return 'no_widget';
+  const [, , w, h, vh] = b;
+  if (b[1] + h / 2 < 0 || b[1] + h / 2 > vh) {
+    return `out_of_view:${Math.round(b[0])},${Math.round(b[1])}/${vh}`;
+  }
+  // Turnstile 控件在 shadow DOM 里（查不到 iframe），但 300x65 的框贴在容器左上，
+  // 复选框就在左边约 30px 处；再补一下正中（有时要的是整块区域）。
+  const pts = [[b[1] + 30, b[0] + h / 2], [b[1] + w / 2, b[0] + h / 2]];
   for (const [x, y] of pts) {
     try {
       await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y });
@@ -167,9 +228,9 @@ async function clickWidget() {
       await sleep(90);
       await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', buttons: 0, clickCount: 1 });
     } catch (e) { return 'click_error'; }
-    await sleep(400);
+    await sleep(500);
   }
-  return 'clicked';
+  return `clicked@${Math.round(b[1])},${Math.round(b[0])}`;
 }
 
 // 把窗口从屏幕外搬回来，并请求聚焦（窗口是 offscreen 时没人能点验证框）
@@ -190,9 +251,49 @@ async function showWindow() {
 // 每轮：等着 → 到点自己点一下 → 到点把窗口弹出来给人点 → 到点刷新重来
 // （不要一开始就刷新，刷新会把已经等到的进度丢掉）
 const usedTokens = new Set();
-const readToken = () => ev(`(()=>{const els=[...document.querySelectorAll('[name="cf-turnstile-response"]')];for(const el of els){if(el.value&&el.value.length>50)return el.value}return ''})()`);
+// 只认 reviewForm 里的响应；找不到表单时才退回全页面（此时也不会真的提交）
+const readToken = () => ev(`(()=>{
+  const f = document.forms.reviewForm;
+  const els = f ? [...f.querySelectorAll('[name="cf-turnstile-response"]')]
+                : [...document.querySelectorAll('[name="cf-turnstile-response"]')];
+  for (const el of els) { if (el.value && el.value.length > 50) return el.value; }
+  return '';
+})()`);
+
+// 人工等待上限（秒）。默认 5 分钟，够点一次验证；超时只是把控制权交回，
+// 浏览器和页面都不关，用户可以选择「继续等待」接着等。
+const MANUAL_WAIT = Math.max(60, Number(cfg.wait || 300));
 
 async function waitToken() {
+  if (SHOW) {
+    // 人工模式：把窗口摆到正面、验证框滚进视野，然后**只等**。
+    // 不自动点（点不对反而会把挑战弄成「正在验证…」卡死），
+    // 也不定时刷新（刷新等于把用户正在做的验证重置掉）。
+    console.log('WINDOW_SHOWN 0', await showWindow());
+    console.log('WIDGET_IN_VIEW', JSON.stringify(await bringWidgetIntoView()));
+    console.log('NEED_MANUAL', '浏览器窗口已打开：请点一下「确认您是真人」，点完会自动继续');
+    console.log('VERIFICATION_REQUIRED manual');
+    const t0 = Date.now();
+    let nextLog = 0;
+    for (let i = 0; i < MANUAL_WAIT; i++) {
+      const tok = await readToken();
+      if (isToken(tok) && !usedTokens.has(tok)) { usedTokens.add(tok); return tok; }
+      const sec = Math.round((Date.now() - t0) / 1000);
+      if (sec >= nextLog) {
+        nextLog = sec + 15;
+        const st = await pageState();
+        console.log('TOKEN_WAIT', 0, sec + 's',
+                    JSON.stringify({ form: st.form, widget: st.widget, api: st.api,
+                                     cf: st.cf, rtoken: st.rtoken, rtlen: st.rtlen,
+                                     vis: st.vis }));
+      }
+      await sleep(1000);
+    }
+    console.log('VERIFICATION_TIMEOUT', MANUAL_WAIT);
+    return '';
+  }
+
+  // 无人值守：两轮，到点自动点一下；只有轮次之间才刷新页面
   const rounds = [{ wait: 90, click: 12, show: 40 }, { wait: 80, click: 8, show: 22 }];
   for (let round = 0; round < rounds.length; round++) {
     const t0 = Date.now();
@@ -209,6 +310,7 @@ async function waitToken() {
       if (!shown && sec >= rounds[round].show) {
         shown = true;
         console.log('WINDOW_SHOWN', round, await showWindow());
+        console.log('VERIFICATION_REQUIRED auto_window');
         console.log('NEED_MANUAL', '如果看到「确认您是真人」，请手动点一下');
       }
       if (sec >= nextLog) {
@@ -216,7 +318,8 @@ async function waitToken() {
         const st = await pageState();
         console.log('TOKEN_WAIT', round, sec + 's',
                     JSON.stringify({ form: st.form, widget: st.widget, api: st.api,
-                                     cf: st.cf, token: st.token, vis: st.vis, title: st.title }));
+                                     cf: st.cf, rtoken: st.rtoken, rtlen: st.rtlen,
+                                     vis: st.vis }));
       }
       await sleep(1000);
     }
@@ -321,9 +424,15 @@ async function waitReport() {
 
 // ---------------- 主流程（可重试） ----------------
 let last = null;
-for (let attempt = 1; attempt <= MAX_TRY; attempt++) {
-  console.log('ATTEMPT', attempt + '/' + MAX_TRY);
-  if (!(await gotoHome())) done(1);
+for (let attempt = 1; attempt <= (RESUME ? 1 : MAX_TRY); attempt++) {
+  console.log('ATTEMPT', attempt + '/' + (RESUME ? 1 : MAX_TRY));
+  if (RESUME) {
+    // 接续上一轮：页面还是原样，直接等 token，绝不重新导航
+    console.log('RESUME', await ev('location.href'));
+    console.log('PAGE_STATE', JSON.stringify(await pageState()));
+  } else if (!(await gotoHome())) {
+    done(1);
+  }
 
   // 自测钩子：只验证「点验证框 / 把窗口搬回屏幕」这两个动作能不能用
   if (process.env.MC_WINDOW_TEST === '1') {
@@ -335,8 +444,12 @@ for (let attempt = 1; attempt <= MAX_TRY; attempt++) {
   if (!DRY) {
     const tok = await waitToken();
     if (!tok) {
-      console.log('NO_TOKEN_STATE', JSON.stringify(await pageState()));
+      const st = await pageState();
+      console.log('NO_TOKEN_STATE', JSON.stringify(st));
       console.log('NO_TOKEN len=0');
+      // 人工模式下超时不是「失败」，而是「还没做完」：浏览器、profile、页面都留着，
+      // Python 据此返回可恢复状态，用户点「继续等待」就在同一页面上接着等。
+      if (SHOW) console.log('VERIFICATION_PENDING', 'window_kept_open');
       done(2);
     }
     console.log('TOKEN_OK len=' + tok.length);

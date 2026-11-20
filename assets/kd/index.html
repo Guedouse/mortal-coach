@@ -59,6 +59,11 @@
                             </label>
                         </div>
                         <div class="link-status" id="link-status"></div>
+                        <div class="submit-actions" id="submit-actions" hidden>
+                            <button type="button" id="sb-show">显示验证窗口</button>
+                            <button type="button" id="sb-resume">继续等待</button>
+                            <button type="button" id="sb-cancel">取消这次</button>
+                        </div>
                         <ul class="hv-notes">
                             <li>雀魂链接形如 <code>game.maj-soul.com/1/?paipu=…</code>，整条贴进来即可；天凤贴 <code>tenhou.net/0/?log=…</code>。</li>
                             <li>链接里带 <code>_a…</code> 时座次自动识别；一番街对局 ID 末尾的 <code>@N</code> 就是座位。</li>
@@ -257,6 +262,12 @@
                     </div>
                     <p class="st-hint">Chrome、Edge 都会自动找；Brave / Vivaldi / 360 极速等
                         Chromium 内核浏览器也能用，点「选择…」指到它的 exe 即可（Firefox 不行）。</p>
+                    <div class="st-row">
+                        <button type="button" id="st-open-verify">打开验证页面</button>
+                        <span class="st-hint" id="st-browser-actual"></span>
+                    </div>
+                    <p class="st-hint">「打开验证页面」会用一个独立窗口打开 Mortal 首页，可以先确认
+                        浏览器与网络是通的；这里打开的窗口不会被自动关掉，用完自己关即可。</p>
                 </section>
                 <section class="st-sec">
                     <h4>恶手门槛与档位 · 权重差</h4>

@@ -3171,6 +3171,30 @@ async function initSettings() {
         const r = await api().pick_browser()
         if (r && r.ok && r.path) setV('st-chrome', r.path)
     }
+    // 实际用的浏览器 / 构建版本：只显示探测结果，不写进配置（发行包不泄漏本机路径）
+    const actual = document.getElementById('st-browser-actual')
+    if (actual && api() && api().get_submit_status) {
+        api().get_submit_status().then(s => {
+            if (!s) return
+            const b = (s.browser || '').split(/[\\/]/).pop()
+            const SRC = { settings: '手动指定', env: '环境变量', system: '系统浏览器',
+                          registry: '系统浏览器', bundled: '包内浏览器' }
+            actual.textContent = (b
+                ? `实际使用：${b}${s.browser_version ? ' · ' + s.browser_version : ''}`
+                  + `（${SRC[s.browser_source] || '自动'}）`
+                : '实际使用：还没启动过浏览器')
+                + `${s.browser_note ? ' · ' + s.browser_note : ''}`
+                + ` · 程序 ${s.app_build || ''} · 脚本 build ${s.submit_build || ''}`
+        }).catch(() => {})
+    }
+    const openv = document.getElementById('st-open-verify')
+    if (openv) openv.onclick = async () => {
+        if (!api() || !api().open_verification_page) return
+        const m = document.getElementById('st-msg')
+        if (m) m.textContent = '正在打开验证页面…'
+        const r = await api().open_verification_page()
+        if (m) m.textContent = (r && r.msg) || (r && r.ok ? '已打开' : '打不开')
+    }
     ;['st-bad-thresh', 'st-bad-g-severe'].forEach(id => {
         const el = document.getElementById(id)
         if (el) el.oninput = paintBadCounts
@@ -3190,6 +3214,7 @@ async function initLibrary() {
     const inp = document.getElementById('link-input')
     if (go) go.onclick = submitLink
     if (inp) inp.onkeydown = e => { if (e.key === 'Enter') submitLink() }
+    wireSubmitActions()
     const fmtSel = document.getElementById('fmt-select')
     if (fmtSel && inp) {
         const syncHint = () => { inp.placeholder = fmtHint(fmtSel.value) }
@@ -3263,6 +3288,94 @@ async function waitCoach(tag, tries = 10) {
     return null
 }
 
+// ---- 提交流程：实时阶段 + 人工验证可续 ----
+const SUBMIT_STAGE_CN = {
+    STARTING: '正在启动浏览器',
+    BROWSER_STARTING: '正在启动浏览器',
+    AWAITING_VERIFICATION: '等待你在浏览器里完成人机验证',
+    SUBMITTING: '正在提交到 Mortal',
+    SCORING: 'Mortal 正在评分',
+    DOWNLOADING: '正在下载报告',
+    SUBMIT_REJECTED: 'Mortal 拒绝了这个牌谱',
+    CANCELLED: '已取消',
+}
+let SUBMIT_POLL = 0
+
+function submitActions(show) {
+    const bar = document.getElementById('submit-actions')
+    if (bar) bar.hidden = !show
+}
+
+function stopSubmitPoll() {
+    if (SUBMIT_POLL) { clearInterval(SUBMIT_POLL); SUBMIT_POLL = 0 }
+}
+
+// Promise 还没返回时也要能看到卡在哪一步：以前「请点验证码」这种提示
+// 要等整个流程结束才出现，等看到的时候人早就错过了能点的时机。
+function startSubmitPoll(st, head) {
+    stopSubmitPoll()
+    const api = (window.pywebview || {}).api || {}
+    if (!api.get_submit_status) return
+    SUBMIT_POLL = setInterval(async () => {
+        let s = null
+        try { s = await api.get_submit_status() } catch (e) { return }
+        if (!s || !s.active) return
+        const label = SUBMIT_STAGE_CN[s.stage] || s.stage || '处理中'
+        let txt = `${head} … ${label}`
+        if (s.wait) txt += ` · 已等 ${s.wait}s`
+        if (s.detail) txt += `（${s.detail}）`
+        const wait = s.stage === 'AWAITING_VERIFICATION'
+        st.className = 'link-status ' + (wait ? 'warn' : 'busy')
+        st.textContent = txt
+        submitActions(wait)
+    }, 1000)
+}
+
+async function openReport(tag) {
+    const coach = await waitCoach(tag)
+    const st = document.getElementById('link-status')
+    if (!coach) {
+        if (st) {
+            st.className = 'link-status warn'
+            st.textContent = '报告已下载，但解读文件还没读到；重新打开本局即可（文件已落盘）。'
+        }
+    }
+    let q = '?data=' + encodeURIComponent('report/' + tag + '.json')
+    const first = coach && coach.moves ? Object.keys(coach.moves)[0] : ''
+    if (first && first.indexOf(':') > 0) {
+        const [hh, pp] = first.split(':')
+        q += `&hand=${hh}&ply=${pp}`
+    }
+    location.href = location.pathname + q
+}
+
+// 统一的收尾：verification_pending 不是失败，只是还没做完
+async function applySubmitResult(r, st) {
+    if (!r) { st.className = 'link-status bad'; st.textContent = '没有返回结果'; return }
+    if (r.status === 'verification_pending') {
+        st.className = 'link-status warn'
+        st.textContent = (r.msg || '需要你在浏览器里点一下人机验证')
+            + (r.tag ? `　（标签 ${r.tag}）` : '')
+        submitActions(true)
+        return
+    }
+    submitActions(false)
+    if (!r.ok) {
+        const partial = r.status === 'partial'
+        st.className = 'link-status ' + (partial ? 'warn' : 'bad')
+        st.textContent = (partial ? '部分完成' : '失败')
+            + (r.stage ? `（阶段 ${r.stage}）` : '') + '：' + (r.msg || '未知错误')
+        if (r.tag) {
+            await initLibrary()
+            if (partial) st.textContent += '　报告已下载，可以直接打开这一局。'
+        }
+        return
+    }
+    st.textContent = '解读已生成，正在打开…'
+    await initLibrary()
+    await openReport(r.tag)
+}
+
 async function submitLink() {
     const inp = document.getElementById('link-input')
     const st = document.getElementById('link-status')
@@ -3280,43 +3393,66 @@ async function submitLink() {
     const model = (document.getElementById('model-select') || {}).value || '4.1b'
     const seat = (document.getElementById('seat-select') || {}).value || ''
     st.className = 'link-status busy'
-    st.textContent = `提交 Mortal（${model}）… 人机验证 / 排队 / 下载 / 生成解读，通常 1~5 分钟；失败会自动重试，不用重复点`
+    st.textContent = `提交 Mortal（${model}）… 正在启动浏览器`
     if (go) go.disabled = true
+    submitActions(false)
+    startSubmitPoll(st, `提交 Mortal（${model}）`)
     try {
         const r = await window.pywebview.api.submit_link(url, fmt, model, seat)
-        if (!r) { st.className = 'link-status bad'; st.textContent = '没有返回结果'; return }
-        if (!r.ok) {
-            const partial = r.status === 'partial'
-            st.className = 'link-status ' + (partial ? 'warn' : 'bad')
-            st.textContent = (partial ? '部分完成' : '失败')
-                + (r.stage ? `（阶段 ${r.stage}）` : '') + '：' + (r.msg || '未知错误')
-            if (r.tag) {
-                await initLibrary()
-                if (partial) st.textContent += '　报告已下载，可以直接打开这一局。'
-            }
-            return
-        }
-        st.textContent = '解读已生成，正在打开…'
-        await initLibrary()
-        const coach = await waitCoach(r.tag)
-        if (!coach) {
-            st.className = 'link-status warn'
-            st.textContent = '报告已下载，但解读文件还没读到；重新打开本局即可（文件已落盘）。'
-        }
-        let q = '?data=' + encodeURIComponent('report/' + r.tag + '.json')
-        const first = coach && coach.moves ? Object.keys(coach.moves)[0] : ''
-        if (first && first.indexOf(':') > 0) {
-            const [hh, pp] = first.split(':')
-            q += `&hand=${hh}&ply=${pp}`
-        }
-        location.href = location.pathname + q
+        stopSubmitPoll()
+        await applySubmitResult(r, st)
     } catch (e) {
         st.className = 'link-status bad'
         st.textContent = '出错：' + ((e && e.message) || e)
     } finally {
+        stopSubmitPoll()
         if (go) go.disabled = false
     }
 }
+
+// 继续等待：同一浏览器、同一页面，不重新开始
+async function resumeSubmit() {
+    const st = document.getElementById('link-status')
+    if (!st) return
+    const api = (window.pywebview || {}).api || {}
+    if (!api.resume_submit) return
+    st.className = 'link-status busy'
+    st.textContent = '继续等待验证…'
+    startSubmitPoll(st, '继续等待验证')
+    try {
+        const r = await api.resume_submit()
+        stopSubmitPoll()
+        await applySubmitResult(r, st)
+    } catch (e) {
+        st.className = 'link-status bad'
+        st.textContent = '出错：' + ((e && e.message) || e)
+    } finally {
+        stopSubmitPoll()
+    }
+}
+
+function wireSubmitActions() {
+    const st = document.getElementById('link-status')
+    const api = () => (window.pywebview || {}).api || {}
+    const show = document.getElementById('sb-show')
+    const resume = document.getElementById('sb-resume')
+    const cancel = document.getElementById('sb-cancel')
+    if (show) show.onclick = async () => {
+        const fn = api().show_verification_browser
+        if (!fn) return
+        const r = await fn()
+        if (st && r) { st.className = 'link-status ' + (r.ok ? 'busy' : 'bad'); st.textContent = r.msg || '' }
+    }
+    if (resume) resume.onclick = resumeSubmit
+    if (cancel) cancel.onclick = async () => {
+        const fn = api().cancel_submit
+        if (fn) await fn()
+        stopSubmitPoll()
+        submitActions(false)
+        if (st) { st.className = 'link-status'; st.textContent = '已取消这次提交' }
+    }
+}
+
 
 const GS = new GlobalState
 // 调试用：控制台执行 MCDEBUG() 可看解读数据与恶手标记的挂载情况

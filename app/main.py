@@ -55,6 +55,20 @@ def hidden_process_kwargs():
     return kw
 
 
+def gui_process_kwargs():
+    """给**带界面的**子进程（Chrome）用：只关控制台，绝不能带 SW_HIDE。
+
+    STARTF_USESHOWWINDOW + SW_HIDE 会作用到进程的顶层窗口，Chrome 照做 ——
+    窗口建出来就是隐藏的，`--window-position` 放哪儿都看不见，
+    设置里勾了「显示浏览器窗口」也没用，人机验证就永远没人能点。
+    要「用户看不到」请用 `--window-position=-32000,-32000` 挪到屏幕外。
+    """
+    kw = {}
+    if os.name == "nt":
+        kw["creationflags"] = CREATE_NO_WINDOW
+    return kw
+
+
 def child_env():
     """子进程环境：把程序目录与牌谱库目录传下去，脚本据此定位数据。"""
     e = dict(os.environ)
@@ -487,19 +501,44 @@ def bundled_chrome():
     return ""
 
 
-def find_chrome():
-    """提交牌谱需要一个能过 Turnstile 的真浏览器。
+# 本次实际选中的浏览器来自哪一层，设置页与自检都显示出来。
+#   settings = 用户指定的路径；env = MORTAL_COACH_CHROME；
+#   system   = 常见安装位置/注册表里的正式版 Chrome/Edge；
+#   bundled  = full 包内 runtime/chromium
+CHROME_SOURCE = ""
+CHROME_NOTE = ""
 
-    顺序：设置里指定的 → 环境变量 → **随包的 runtime/chromium** → 常见安装位置 → 注册表。
-    随包那份排在系统前面，full 版才能保证用的是自带浏览器。
+
+def chrome_candidates():
+    """按优先级列出**存在**的浏览器候选 [(路径, 来源), ...]，已去重。
+
+    顺序：用户指定 → 环境变量 → 系统正式版 Chrome/Edge → full 包内 Chromium → 注册表。
+
+    随包那份排在系统后面：它是 Chromium 快照，版本号与发布通道都和用户日常
+    浏览器不同，Cloudflare 对它的信任度没有保证；把它排前面会让「本来用系统
+    Chrome 跑得好好的」用户在没有改任何设置的情况下换内核。full 版的价值是
+    「没装浏览器也能用」，所以只在找不到系统浏览器时兜底。
     """
-    cands = [(CONFIG.get("chrome") or "").strip(),
-             os.environ.get("MORTAL_COACH_CHROME") or "",
-             bundled_chrome()]
-    cands += [os.path.expandvars(p) for p in CHROME_CANDIDATES]
-    for c in cands:
-        if c and Path(c).exists():
-            return c
+    seen, out = set(), []
+
+    def add(p, src):
+        if not p:
+            return
+        try:
+            p = os.path.expandvars(str(p))
+            key = os.path.normcase(os.path.abspath(p))
+        except Exception:
+            return
+        if key in seen or not Path(p).exists():
+            return
+        seen.add(key)
+        out.append((p, src))
+
+    add((CONFIG.get("chrome") or "").strip(), "settings")
+    add(os.environ.get("MORTAL_COACH_CHROME") or "", "env")
+    for p in CHROME_CANDIDATES:
+        add(p, "system")
+    add(bundled_chrome(), "bundled")
     # 注册表里 Chrome 的 App Paths 最可靠（自定义安装目录也能找到）
     if os.name == "nt":
         try:
@@ -509,13 +548,23 @@ def find_chrome():
                     try:
                         with winreg.OpenKey(hive, rf"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\{exe}") as k:
                             v = winreg.QueryValue(k, None)
-                        if v and Path(v).exists():
-                            return v
+                        add(v, "registry")
                     except Exception:
                         continue
         except Exception:
             pass
-    return ""
+    return out
+
+
+def find_chrome():
+    """本次该用哪个浏览器（第一个存在的候选），并把来源记进 CHROME_SOURCE。"""
+    global CHROME_SOURCE
+    cands = chrome_candidates()
+    if not cands:
+        CHROME_SOURCE = ""
+        return ""
+    CHROME_SOURCE = cands[0][1]
+    return cands[0][0]
 
 
 def webview2_root():
@@ -886,9 +935,162 @@ def read_devtools_port(profile_dir):
         return 0
 
 
+def cdp_json(port, path, timeout=3.0):
+    """读本地调试端口的 JSON 接口（/json/list、/json/version）。失败返回 None。"""
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}{path}", timeout=timeout) as r:
+            return json.loads(r.read().decode("utf-8", "replace"))
+    except Exception:
+        return None
+
+
+def cdp_page_targets(port):
+    """当前可用的页面 target。空列表 = 还没有页面（about:blank 也算一个页面）。"""
+    rows = cdp_json(port, "/json/list") or []
+    return [t for t in rows if t.get("type") == "page"]
+
+
+def cdp_browser_version(port):
+    info = cdp_json(port, "/json/version") or {}
+    return (info.get("Browser") or "").strip()
+
+
+def find_window_by_pid(pid):
+    """找某个进程自己的顶层浏览器窗口（Chrome_WidgetWin_1）。
+
+    只看我们自己启动的那个 PID：不枚举全系统窗口去「猜」哪个是浏览器，
+    避免误把用户日常 Chrome 抢到前台。
+    """
+    if os.name != "nt":
+        return 0
+    from ctypes import wintypes
+    u32 = ctypes.windll.user32
+    found = []
+
+    @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+    def _cb(hwnd, _lparam):
+        p = wintypes.DWORD()
+        u32.GetWindowThreadProcessId(hwnd, ctypes.byref(p))
+        if p.value == pid:
+            cls = ctypes.create_unicode_buffer(64)
+            u32.GetClassNameW(hwnd, cls, 64)
+            rect = wintypes.RECT()
+            u32.GetWindowRect(hwnd, ctypes.byref(rect))
+            if cls.value == "Chrome_WidgetWin_1" and rect.right - rect.left > 300:
+                found.append(hwnd)
+        return True
+
+    u32.EnumWindows(_cb, 0)
+    return found[0] if found else 0
+
+
 # 本次进程实际使用的调试端口；只有 ensure_chrome 启动了浏览器才会非 0。
 # submit_auto.mjs 通过 CDP_PORT 收到它，不去碰别的端口。
 CDP_PORT = 0
+# 浏览器就绪分两级：端口通（进程活着、能连调试协议）≠ 页面就绪（有 page target）。
+# 只报「端口通」会把「打开了但一片空白」说成成功，排查时完全看不出区别。
+CHROME_STATE = ""
+CHROME_VER = ""
+
+# ---------------------------------------------------------------- 构建标识
+# 用户双击的是**冻结后的 EXE**，改 app/main.py 不会自动生效。以前出过
+# 「源码修好了、EXE 还是旧的」这种混合状态，所以把身份显式报出来：
+#   - EXE 构建时间取可执行文件自身的修改时间（改名/重打包必然变化）
+#   - 外置 JS 自带 SCRIPT_BUILD，两边不一致时日志与设置里直接标红
+SUBMIT_BUILD = 4          # 必须与 tools/submit_auto.mjs 的 BUILD 一致
+# 勾了「显示浏览器」时等用户点验证的上限（秒）。MC_MANUAL_WAIT 只给排查/自测用。
+MANUAL_WAIT_SEC = int(os.environ.get("MC_MANUAL_WAIT") or 300)
+APP_BUILD = "2026-11-21"  # 源码构建号，发版时更新
+
+
+def _exe_timestamp():
+    """PE 头里的链接时间。**不能用文件 mtime**：用户从 ZIP 解压后 mtime 会变成
+    解压时间，每个人看到的「版本」都不一样；PE 里的时间戳是编译时写死的。"""
+    try:
+        import struct
+        with open(sys.executable, "rb") as f:
+            d = f.read(4096)
+        if len(d) < 0x40 or d[:2] != b"MZ":
+            return 0
+        off = struct.unpack_from("<I", d, 0x3C)[0]
+        if off + 12 > len(d) or d[off:off + 4] != b"PE\0\0":
+            return 0
+        return struct.unpack_from("<I", d, off + 8)[0]
+    except Exception:
+        return 0
+
+
+def build_id():
+    """当前到底跑的是哪个构建：冻结包看 PE 编译时间，源码运行看源码构建号。"""
+    if getattr(sys, "frozen", False):
+        ts = _exe_timestamp()
+        if ts:
+            return "exe " + time.strftime("%Y-%m-%d %H:%M", time.localtime(ts))
+        try:
+            st = os.stat(sys.executable)
+            return "exe " + time.strftime("%Y-%m-%d %H:%M", time.localtime(st.st_mtime))
+        except OSError:
+            return "exe"
+    return "source " + APP_BUILD
+
+
+# ------------------------------------------------------------ 提交阶段状态
+# 前端在 submit_link 的 Promise 还没返回时轮询 get_submit_status()，
+# 这样「需要你点一下验证」能当场显示，而不是等三分钟拿到失败结果才知道。
+SUBMIT_STATE = {
+    "active": False, "stage": "", "detail": "", "wait": 0,
+    "tag": "", "resumable": False, "started": 0.0, "updated": 0.0,
+}
+SUBMIT_LOCK = threading.Lock()
+
+
+def submit_state_reset(tag=""):
+    with SUBMIT_LOCK:
+        SUBMIT_STATE.update({"active": True, "stage": "STARTING", "detail": "",
+                             "wait": 0, "tag": tag, "resumable": False,
+                             "started": time.time(), "updated": time.time()})
+
+
+def submit_state_set(stage=None, detail=None, wait=None, resumable=None, active=None):
+    with SUBMIT_LOCK:
+        if stage is not None:
+            SUBMIT_STATE["stage"] = stage
+        if detail is not None:
+            SUBMIT_STATE["detail"] = str(detail)[:300]
+        if wait is not None:
+            SUBMIT_STATE["wait"] = int(wait)
+        if resumable is not None:
+            SUBMIT_STATE["resumable"] = bool(resumable)
+        if active is not None:
+            SUBMIT_STATE["active"] = bool(active)
+        SUBMIT_STATE["updated"] = time.time()
+
+
+def submit_state_get():
+    with SUBMIT_LOCK:
+        d = dict(SUBMIT_STATE)
+    d["elapsed"] = round(time.time() - d["started"], 1) if d.get("started") else 0
+    return d
+
+
+# submit_auto.mjs 的行 → 阶段。第一列是它输出的关键字。
+def submit_stage_of(line):
+    """把脚本的一行输出翻译成（阶段, 是否要立刻告诉用户）。"""
+    t = line.strip()
+    for key, stage in (("NEED_MANUAL", "AWAITING_VERIFICATION"),
+                       ("VERIFICATION_REQUIRED", "AWAITING_VERIFICATION"),
+                       ("VERIFICATION_TIMEOUT", "AWAITING_VERIFICATION"),
+                       ("TOKEN_OK", "SUBMITTING"),
+                       ("SUBMIT_URL", "SUBMITTING"),
+                       ("SUBMIT ", "SUBMITTING"),
+                       ("REPORT ", "DOWNLOADING"),
+                       ("PAGE_ERROR", "SUBMIT_REJECTED")):
+        if t.startswith(key):
+            return stage
+    if t.startswith("wait ") and "/progress" in t:
+        return "SCORING"
+    return None
+
 
 
 def no_token_hint(out, logp=None):
@@ -1381,6 +1583,10 @@ class Api:
         self.busy = False       # 等价于 bool(self._op)，保留旧名字给已有调用方看
         self._chrome_proc = None
         self._owns_chrome = False
+        # 人工验证期间要保留的东西：脚本进程、待续任务、以及「别关浏览器」标志
+        self._node_proc = None
+        self._pending = {}
+        self._keep_chrome = False
         atexit.register(self.close_owned_chrome)
 
     def _begin_op(self, name):
@@ -1659,49 +1865,112 @@ class Api:
                 and self._chrome_proc.poll() is None and CDP_PORT and port_open(CDP_PORT)):
             return True
 
-        chrome = find_chrome()
-        if not chrome:
+        cands = chrome_candidates()
+        if not cands:
+            globals()["CHROME_STATE"] = "BROWSER_NOT_FOUND"
+            globals()["CHROME_NOTE"] = "no chromium-based browser found"
             return False
+
+        # profile 按**本副本**分开，不放在 LIB 里：两个实例可能指向同一个
+        # 网盘/移动盘上的库，共用 profile 会互相删对方的 DevToolsActivePort，
+        # 甚至同时写坏 cookies。放实例目录后各自独立。
+        prof = prepare_profile(instance_dir() / "chrome-profile")
+        repair_chrome_prefs(prof)
+        # 上一轮留下的端口文件会让我们读到过期端口，先删掉
         try:
-            # profile 按**本副本**分开，不放在 LIB 里：两个实例可能指向同一个
-            # 网盘/移动盘上的库，共用 profile 会互相删对方的 DevToolsActivePort，
-            # 甚至同时写坏 cookies。放实例目录后各自独立。
-            prof = prepare_profile(instance_dir() / "chrome-profile")
-            repair_chrome_prefs(prof)
-            # 上一轮留下的端口文件会让我们读到过期端口，先删掉
+            (Path(prof) / "DevToolsActivePort").unlink()
+        except OSError:
+            pass
+        pos = "0,0" if CONFIG.get("show_browser") else "-32000,-32000"
+
+        # 路径存在 ≠ 能跑：残缺安装、被组策略拦、指向已删目录的快捷方式都见过。
+        # 所以逐个**试启动**，最多 3 个候选；一旦调试端口通了就固定下来，绝不
+        # 在人工验证中途换内核（换内核 = 换浏览器身份，验证进度全丢）。
+        port = 0
+        skipped = []
+        for cand, src in cands[:3]:
+            try:
+                self._chrome_proc = subprocess.Popen(
+                    [cand, "--remote-debugging-port=0",
+                         f"--user-data-dir={prof}",
+                         f"--window-position={pos}", "--window-size=1000,760",
+                         "--no-first-run", "--no-default-browser-check",
+                         "--disable-session-crashed-bubble", "--hide-crash-restore-bubble",
+                         "--disable-restore-session-state", "--disable-background-mode",
+                         "--noerrdialogs", "--disable-breakpad", "--no-service-autorun",
+                         "--disable-translate", "--lang=zh-CN",
+                         # 窗口在屏幕外时 Chrome 会把后台页面的定时器降频，人机验证
+                         # 的轮询一慢就更拿不到 token —— 这几个开关一起关掉。
+                         "--disable-background-timer-throttling",
+                         "--disable-renderer-backgrounding",
+                         "--disable-backgrounding-occluded-windows",
+                         "--disable-features=CalculateNativeWinOcclusion,Translate,MediaRouter",
+                         "https://mjai.ekyu.moe/"], **gui_process_kwargs())
+                self._owns_chrome = True
+                CDP_PORT = 0
+            except Exception as e:
+                skipped.append("%s: cannot start (%s)" % (Path(cand).name, type(e).__name__))
+                self._chrome_proc = None
+                self._owns_chrome = False
+                continue
+            got = 0
+            for _ in range(80):
+                time.sleep(0.25)
+                got = read_devtools_port(prof)
+                if got and port_open(got):
+                    break
+                if self._chrome_proc.poll() is not None:
+                    break
+            if got and port_open(got):
+                port = got
+                globals()["CHROME"] = cand
+                globals()["CHROME_SOURCE"] = src
+                globals()["CHROME_NOTE"] = ("; ".join(skipped) + "; " if skipped else "") + "using " + src
+                break
+            skipped.append("%s: devtools port never came up" % Path(cand).name)
+            try:
+                self._chrome_proc.kill()
+            except Exception:
+                pass
+            self._chrome_proc = None
+            self._owns_chrome = False
             try:
                 (Path(prof) / "DevToolsActivePort").unlink()
             except OSError:
                 pass
-            pos = "0,0" if CONFIG.get("show_browser") else "-32000,-32000"
-            self._chrome_proc = subprocess.Popen(
-                [chrome, "--remote-debugging-port=0",
-                 f"--user-data-dir={prof}",
-                 f"--window-position={pos}", "--window-size=1000,760",
-                 "--no-first-run", "--no-default-browser-check",
-                 "--disable-session-crashed-bubble", "--hide-crash-restore-bubble",
-                 "--disable-restore-session-state", "--disable-background-mode",
-                 "--noerrdialogs", "--disable-breakpad", "--no-service-autorun",
-                 "--disable-translate", "--lang=zh-CN",
-                 # 窗口在屏幕外时 Chrome 会把后台页面的定时器降频，人机验证
-                 # 的轮询一慢就更拿不到 token —— 这几个开关一起关掉。
-                 "--disable-background-timer-throttling",
-                 "--disable-renderer-backgrounding",
-                 "--disable-backgrounding-occluded-windows",
-                 "--disable-features=CalculateNativeWinOcclusion,Translate,MediaRouter",
-                 "https://mjai.ekyu.moe/"], **hidden_process_kwargs())
-            self._owns_chrome = True
-            CDP_PORT = 0
-        except Exception:
+        if not port:
+            globals()["CHROME_STATE"] = "BROWSER_START_FAILED"
+            globals()["CHROME_NOTE"] = "; ".join(skipped)[:300]
             return False
-        for _ in range(80):
-            time.sleep(0.25)
-            port = read_devtools_port(prof)
-            if port and port_open(port):
-                CDP_PORT = port
+        CDP_PORT = port
+
+        # 第二步：真的有页面可用。端口通但 target 还没建出来时，
+        # submit_auto 会以为是空浏览器直接 NO_PAGE —— 那其实是「还没好」，不是「坏了」。
+        for _ in range(40):
+            if cdp_page_targets(port):
+                globals()["CHROME_STATE"] = "PAGE_READY"
+                globals()["CHROME_VER"] = cdp_browser_version(port)
                 return True
             if self._chrome_proc.poll() is not None:
-                return False
+                break
+            time.sleep(0.25)
+        # 一个页面都没有：让浏览器自己开一个（新版本 Chrome 要求 PUT）
+        try:
+            import urllib.parse as _up
+            req = urllib.request.Request(
+                f"http://127.0.0.1:{port}/json/new?{_up.quote('https://mjai.ekyu.moe/', safe='')}",
+                method="PUT")
+            urllib.request.urlopen(req, timeout=5).read()
+        except Exception:
+            pass
+        for _ in range(20):
+            if cdp_page_targets(port):
+                globals()["CHROME_STATE"] = "PAGE_CREATED"
+                globals()["CHROME_VER"] = cdp_browser_version(port)
+                return True
+            time.sleep(0.25)
+        globals()["CHROME_STATE"] = "PAGE_LOAD_FAILED"
+        globals()["CHROME_VER"] = cdp_browser_version(port)
         return False
 
     def close_owned_chrome(self):
@@ -1732,6 +2001,188 @@ class Api:
         LOGS.mkdir(parents=True, exist_ok=True)
         return LOGS / f"{tag}.log"
 
+    # ---------- 提交脚本：逐行读、实时发布 ----------
+    def _run_submit_node(self, cfg, logs, tag):
+        """跑外置提交脚本，边跑边把阶段发布给前端。
+
+        以前是 subprocess.run(capture_output=True)：脚本跑完才拿到全部输出，
+        于是「请点一下验证码」这种需要用户当下就知道的提示，要等三分钟失败后
+        才会出现在结果里。改成 Popen + 逐行读之后，NEED_MANUAL 一出现就能显示。
+        """
+        import queue as _queue
+        proc = subprocess.Popen([NODE, str(TOOLS / "submit_auto.mjs"), cfg],
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                text=True, encoding="utf-8", errors="replace",
+                                cwd=str(TOOLS), env=child_env(),
+                                **hidden_process_kwargs())
+        self._node_proc = proc
+        q = _queue.Queue()
+
+        def reader():
+            try:
+                for ln in proc.stdout:
+                    q.put(ln.rstrip("\r\n"))
+            except Exception:
+                pass
+            q.put(None)
+
+        threading.Thread(target=reader, daemon=True).start()
+        lines = []
+        deadline = time.time() + 1200
+        saw_build = ""
+        try:
+            while True:
+                try:
+                    ln = q.get(timeout=0.5)
+                except _queue.Empty:
+                    if time.time() > deadline:
+                        proc.kill()
+                        self._write_log(tag, logs + lines + ["SUBMIT_TIMEOUT 20 分钟"])
+                        raise ReportError("SUBMIT_TIMEOUT",
+                                          "提交超时（20 分钟）。Mortal 那边可能排队很久，稍后再试。")
+                    if proc.poll() is not None:
+                        # 进程没了但队列还没读完（reader 退出前会放 None），再给一轮机会
+                        try:
+                            ln = q.get(timeout=1.0)
+                        except _queue.Empty:
+                            break
+                        if ln is None:
+                            break
+                    else:
+                        continue
+                if ln is None:
+                    break
+                if not ln.strip():
+                    continue
+                lines.append(ln)
+                print(ln, flush=True)
+                if ln.startswith("SCRIPT_BUILD"):
+                    saw_build = ln.split()[-1]
+                    if saw_build.isdigit() and int(saw_build) != SUBMIT_BUILD:
+                        msg = (f"WARN 提交脚本版本 {saw_build} 与程序期望的 {SUBMIT_BUILD} 不一致："
+                               "旧脚本配新程序（或反过来）会出现「设置改了不生效」，请用同一版本重新发布")
+                        lines.append(msg)
+                        print(msg, flush=True)
+                    submit_state_set(stage="STARTING")
+                    continue
+                stage = submit_stage_of(ln)
+                if stage:
+                    submit_state_set(stage=stage)
+                if ln.startswith("NEED_MANUAL"):
+                    submit_state_set(detail=ln[len("NEED_MANUAL"):].strip())
+                elif ln.startswith("TOKEN_WAIT"):
+                    parts = ln.split()
+                    if len(parts) >= 3 and parts[2].endswith("s"):
+                        try:
+                            submit_state_set(wait=int(parts[2][:-1]))
+                        except ValueError:
+                            pass
+                elif ln.startswith("VERIFICATION_TIMEOUT"):
+                    submit_state_set(resumable=True)
+        finally:
+            self._node_proc = None
+            try:
+                if proc.poll() is None:
+                    proc.kill()
+            except Exception:
+                pass
+        logs += ["--- submit_auto ---"] + lines
+        return "\n".join(lines)
+
+    # ---------- 给前端用的三个入口 ----------
+    def get_submit_status(self):
+        """前端轮询：Promise 还没返回时也能知道现在卡在哪一步。"""
+        st = submit_state_get()
+        st.update({"app_build": build_id(), "submit_build": SUBMIT_BUILD,
+                   "browser": CHROME or "", "browser_state": CHROME_STATE,
+                   "browser_version": CHROME_VER, "browser_source": CHROME_SOURCE,
+                   "browser_note": CHROME_NOTE,
+                   "show_browser": bool(CONFIG.get("show_browser"))})
+        return st
+
+    def show_verification_browser(self):
+        """把**本应用启动的**浏览器窗口显示出来、置前，并切到 Mortal 标签。
+
+        只操作自己那个 PID 的窗口，不去搜索/接管用户日常浏览器。
+
+        「显示成功」不能只看 ShowWindow 的返回：窗口可能被最小化到托盘、位置
+        还在屏幕外（-32000）、或被系统隐藏。最后用 IsWindowVisible + 屏幕内
+        矩形双重确认，做不到就如实返回失败，让前端给出可操作的提示。
+        """
+        p = self._chrome_proc
+        if not (self._owns_chrome and p is not None and p.poll() is None):
+            return {"ok": False, "msg": "验证用的浏览器没有在运行。点「分析」重新开始。"}
+        if os.name != "nt":
+            return {"ok": False, "msg": "只有 Windows 支持显示验证窗口"}
+        try:
+            hwnd = find_window_by_pid(p.pid)
+            if not hwnd:
+                return {"ok": False, "msg": "没找到浏览器窗口（可能已最小化到托盘）"}
+            u32 = ctypes.windll.user32
+            u32.ShowWindow(hwnd, 9)                       # SW_RESTORE
+            u32.ShowWindow(hwnd, 5)                       # SW_SHOW：被隐藏过也能拉回来
+            rect = wintypes.RECT()
+            u32.GetWindowRect(hwnd, ctypes.byref(rect))
+            sw, sh = u32.GetSystemMetrics(0), u32.GetSystemMetrics(1)
+            # 窗口在屏幕外（-32000）时搬回可见位置
+            if rect.left <= -1000 or rect.top <= -1000:
+                u32.SetWindowPos(hwnd, 0, 60, 40, 1120, 820, 0x0040)
+            elif rect.right > sw + 40 or rect.bottom > sh + 40:
+                u32.SetWindowPos(hwnd, 0, 40, 30, min(1200, sw - 80), min(860, sh - 80), 0x0040)
+            u32.SetForegroundWindow(hwnd)
+            u32.BringWindowToTop(hwnd)
+            # 切到 Mortal 那个标签：多标签时用户看到别的页，验证框等于没露面
+            try:
+                rows = cdp_json(CDP_PORT, "/json/list") or []
+                t = [x for x in rows if x.get("type") == "page"
+                     and "mjai.ekyu.moe" in (x.get("url") or "")]
+                if t:
+                    cdp_json(CDP_PORT, "/json/activate/" + str(t[0].get("id") or ""))
+            except Exception:
+                pass
+            if not u32.IsWindowVisible(hwnd):
+                return {"ok": False, "msg": "浏览器窗口没能显示出来（可能被系统隐藏或被安全软件拦住了）"}
+            u32.GetWindowRect(hwnd, ctypes.byref(rect))
+            if rect.left <= -1000 or rect.top <= -1000:
+                return {"ok": False, "msg": "浏览器窗口还在屏幕外，没能搬到可见位置"}
+            return {"ok": True, "msg": "已把验证窗口放到前面", "visible": True,
+                    "rect": [rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top]}
+        except Exception as e:
+            return {"ok": False, "msg": f"显示窗口失败：{e}"}
+
+    def open_verification_page(self):
+        """设置里点「打开验证页面」：启动（或复用）本应用的浏览器并显示出来。
+
+        用途是先确认「浏览器能开、页面能加载、验证框能点」，不用真的提交一局。
+        """
+        if not (self._owns_chrome and self._chrome_proc is not None
+                and self._chrome_proc.poll() is None and CDP_PORT
+                and port_open(CDP_PORT)):
+            if not self.ensure_chrome():
+                return {"ok": False, "msg": "没能启动浏览器：" + (CHROME_STATE or "未知原因")}
+        self._keep_chrome = True      # 单独打开的窗口不随任务收尾关闭
+        r = self.show_verification_browser()
+        r["browser"] = CHROME
+        r["version"] = CHROME_VER
+        return r
+
+    def cancel_submit(self):
+        """用户主动取消：停掉脚本、关掉本应用启动的浏览器。"""
+        proc = self._node_proc
+        if proc is not None:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+        self._node_proc = None
+        self._keep_chrome = False
+        self._pending = {}
+        self.close_owned_chrome()
+        submit_state_set(active=False, stage="CANCELLED", detail="已取消",
+                         resumable=False)
+        return {"ok": True, "msg": "已取消这次提交"}
+
+
     def _write_log(self, tag, lines):
         try:
             self._logfile(tag).write_text("\n".join(lines), encoding="utf-8")
@@ -1745,8 +2196,28 @@ class Api:
         stage 依次为：VALIDATING_INPUT → CHROME_READY → SUBMITTED → REPORT_URL_READY
                       → REPORT_DOWNLOADED → REPORT_VALIDATED → EXTRACTING/EXPLAINING
                       → COACH_EXPORTING → READY
-        失败时返回 status=failed + error_code，前端直接显示可操作的原因。
+        需要人工点验证码时返回 status=verification_pending（可续），
+        这时**浏览器不关**，用户点「继续等待」走 resume_submit() 接着等。
         """
+        return self._submit_guarded(url, fmt, model, seat, tag=None, resume=False)
+
+    def resume_submit(self):
+        """继续等待人工验证：同一浏览器、同一页面、同一个标签，不重新开始。"""
+        p = self._pending or {}
+        if not p:
+            return {"ok": False, "status": "failed", "stage": "NO_PENDING",
+                    "msg": "没有在等待验证的任务，点「分析」重新开始这一次。"}
+        if not (self._owns_chrome and self._chrome_proc is not None
+                and self._chrome_proc.poll() is None and CDP_PORT
+                and port_open(CDP_PORT)):
+            self._pending = {}
+            return {"ok": False, "status": "failed", "stage": "BROWSER_GONE",
+                    "msg": "用于验证的浏览器已经关掉了，点「分析」重新开始这一次。"}
+        return self._submit_guarded(p.get("url", ""), p.get("fmt", "auto"),
+                                    p.get("model", "4.1b"), p.get("seat", ""),
+                                    tag=p.get("tag") or None, resume=True)
+
+    def _submit_guarded(self, url, fmt, model, seat, tag=None, resume=False):
         if not LIB_EXCLUSIVE:
             # 不能直接 raise：这是在 try 之外，前端只会看到一个没有 stage 的失败，
             # 页面显示不出「该干什么」。统一返回结构化结果。
@@ -1757,20 +2228,34 @@ class Api:
             return {"ok": False, "status": "failed", "stage": "BUSY",
                     "msg": ("上一局还在分析，等它跑完" if self._op == "分析这一局"
                             else self._op_busy_msg("分析"))}
+        self._keep_chrome = False
+        # 先把上一轮的状态清干净：否则续等时会闪一下上次的「已等 45s」和旧阶段
+        submit_state_reset((self._pending or {}).get("tag", ""))
         try:
-            return self._submit(url, fmt, model, seat)
+            return self._submit(url, fmt, model, seat, tag=tag, resume=resume)
         except ReportError as e:
-            return {"ok": False, "status": "failed", "stage": e.code,
-                    "msg": e.msg, "error_code": e.code}
+            out = {"ok": False, "status": "failed", "stage": e.code,
+                   "msg": e.msg, "error_code": e.code}
+            if e.code == "VERIFICATION_PENDING":
+                # 不是失败：验证还没做完。浏览器、profile、页面全部留着，
+                # 用户点「继续等待」就在同一页面上接着等。
+                out.update({"status": "verification_pending", "resumable": True,
+                            "tag": (self._pending or {}).get("tag", ""),
+                            "wait": (self._pending or {}).get("waited", 0),
+                            "browser": CHROME or "", "browser_state": CHROME_STATE})
+            return out
         except Exception as e:
             traceback.print_exc()
             return {"ok": False, "status": "failed", "stage": "UNEXPECTED",
                     "msg": f"{type(e).__name__}: {e}"}
         finally:
-            self.close_owned_chrome()
+            if not self._keep_chrome:
+                self.close_owned_chrome()
+                self._pending = {}
             self._end_op()
+            submit_state_set(active=False)
 
-    def _submit(self, url, fmt, model, seat):
+    def _submit(self, url, fmt, model, seat, tag=None, resume=False):
         logs = []
         t0 = time.time()
 
@@ -1824,7 +2309,10 @@ class Api:
                     f"这个地址是 {host}。请在游戏里「分享牌谱」复制链接再来。")
 
         direct_data = report_data_candidates_from_input(url)
-        tag = next_tag(time.strftime("%y%m%d") if direct_data else tag_from_url(url))
+        if not tag:
+            tag = next_tag(time.strftime("%y%m%d") if direct_data else tag_from_url(url))
+        submit_state_reset(tag)
+        say(f"BUILD {build_id()} · submit_script_build {SUBMIT_BUILD}")
         if direct_data:
             say("检测到 Mortal 报告链接，直接下载报告")
             data_urls = direct_data
@@ -1833,35 +2321,55 @@ class Api:
             data_urls = None
             report_url = ""
 
-        if not direct_data and not self.ensure_chrome():
-            raise ReportError("CHROME_UNAVAILABLE",
-                              "没能启动复盘用的 Chrome。请确认装了 Chrome / Edge"
-                              "（或在其设置里指定浏览器路径）后再试。")
         if not direct_data:
-            say(f"CHROME_READY {Path(CHROME).name if CHROME else 'chrome'} · port {CDP_PORT}"
-                f" · {CHROME or '-'}")
-            time.sleep(2.0)
+            if resume:
+                submit_state_set(stage="AWAITING_VERIFICATION", detail="继续等待验证")
+                say(f"RESUME 沿用同一个浏览器（port {CDP_PORT}）")
+            else:
+                submit_state_set(stage="BROWSER_STARTING", detail="正在启动浏览器")
+                if not self.ensure_chrome():
+                    raise ReportError(
+                        "BROWSER_START_FAILED",
+                        ("没能启动复盘用的浏览器" if CHROME_STATE != "PAGE_LOAD_FAILED"
+                         else "浏览器启动了但没有可用页面（可能被安全软件拦截）")
+                        + "。请确认装了 Chrome / Edge（或在其设置里指定路径）后再试。")
+                say(f"CHROME_READY {Path(CHROME).name if CHROME else 'chrome'} · port {CDP_PORT}"
+                    f" · {CHROME_STATE or 'PAGE_READY'} · {CHROME_SOURCE or '-'}"
+                    f" · {CHROME_VER or '版本未知'} · {CHROME or '-'}")
+            # 页面是否停留在 about:blank 不由 Python 判断：交给脚本 gotoHome，
+            # 它会等到表单真的出现，失败时明确输出 PAGE_LOAD_FAILED。
             cfg = json.dumps({"url": url, "format": fmt, "model": model,
-                              "seat": seat, "kyokus": "", "tempo": ""}, ensure_ascii=False)
+                              "seat": seat, "kyokus": "", "tempo": "",
+                              "show": bool(CONFIG.get("show_browser")),
+                              "resume": bool(resume),
+                              "wait": MANUAL_WAIT_SEC}, ensure_ascii=False)
             say(f"提交到 Mortal（标签 {tag}）…")
-            try:
-                r = subprocess.run([NODE, str(TOOLS / "submit_auto.mjs"), cfg],
-                               capture_output=True, text=True, encoding="utf-8",
-                               errors="replace", timeout=1200, cwd=str(TOOLS),
-                               env=child_env(), **hidden_process_kwargs())
-            except subprocess.TimeoutExpired:
-                self._write_log(tag, logs + ["SUBMIT_TIMEOUT 20 分钟"])
-                raise ReportError("SUBMIT_TIMEOUT", "提交超时（20 分钟）。Mortal 那边可能排队很久，稍后再试。")
-            out = (r.stdout or "") + (r.stderr or "")
-            logs += ["--- submit_auto ---"] + out.splitlines()
+            out = self._run_submit_node(cfg, logs, tag)
 
         m = re.search(r"^REPORT\s+(\S+)\s*$", out, re.M) if not direct_data else True
         if not direct_data and not m:
             self._write_log(tag, logs)
+            # 人工模式超时不是失败：浏览器还开着、页面还在，可以接着等
+            if "VERIFICATION_PENDING" in out:
+                self._keep_chrome = True
+                self._pending = {"url": url, "fmt": fmt, "model": model, "seat": seat,
+                                 "tag": tag, "waited": submit_state_get().get("wait", 0)}
+                raise ReportError(
+                    "VERIFICATION_PENDING",
+                    "浏览器已经打开，但这次验证还没完成。"
+                    "请在弹出的浏览器窗口里点一下「确认您是真人」——点完会自动继续；"
+                    "没反应就点「继续等待」。")
             if "NO_TOKEN" in out:
                 raise ReportError("NO_TOKEN", no_token_hint(out, self._logfile(tag)))
             if "NO_PAGE" in out:
-                raise ReportError("CHROME_UNAVAILABLE", "浏览器里没有打开 mjai.ekyu.moe 的页面。")
+                raise ReportError("BROWSER_START_FAILED",
+                                  "浏览器里一个可用页面都没有（启动后被立刻关掉了？）。")
+            if "PAGE_LOAD_FAILED" in out:
+                raise ReportError(
+                    "PAGE_LOAD_FAILED",
+                    "浏览器打开了，但 Mortal 首页一直没加载出表单。"
+                    "多半是网络/代理拦了 mjai.ekyu.moe，或安全软件阻止了页面脚本。"
+                    f"（浏览器 {CHROME_VER or '版本未知'}，日志 logs/{tag}.log）")
             if "NO_FORM" in out:
                 raise ReportError("NO_REPORT_URL", "Mortal 首页表单没找到，可能官网改版了。")
             if "SUBMIT_NOT_SENT" in out:
@@ -1943,6 +2451,11 @@ class Api:
                 "log": str(self._logfile(tag))}
 
         if status.get("status") == "ok":
+            if CONFIG.get("show_browser"):
+                # 勾了「显示浏览器」：窗口留到应用退出。同一浏览器身份 + 同一
+                # 资料目录，下一局直接复用，不用重新启动、也不必重新过验证。
+                self._keep_chrome = True
+                self._pending = {}
             msg = (f"完成：{bad} 手解读已生成（{head}）" if bad
                    else f"完成：这一局没有超过 30pt 阈值的恶手（{head}）")
             return dict(base, ok=True, msg=msg, elapsed=round(time.time() - t0))
@@ -2147,18 +2660,22 @@ def selftest():
                       "library_writable": _can_write(LIB),
                       "python": PY or None, "node": NODE or None,
                       "chrome": CHROME or None,
-                      "chrome_source": ("bundled" if (CHROME and str(CHROME).lower().startswith(
-                          str(RUNTIME).lower())) else ("system" if CHROME else None)),
+                      "chrome_source": CHROME_SOURCE or None,
+                      "chrome_note": CHROME_NOTE or None,
                       "webview2": WEBVIEW2 or WEBVIEW2_SYS or (
-                          ("系统 " + WEBVIEW2_VER) if WEBVIEW2_VER else None),
+                          ("system " + WEBVIEW2_VER) if WEBVIEW2_VER else None),
                       "webview2_source": ("bundled" if WEBVIEW2 else
                                           "system" if (WEBVIEW2_VER or WEBVIEW2_SYS) else None),
                       "webview2_version": (bundled_webview2_version() or WEBVIEW2_VER or None),
                       "windows_build": windows_build() or None,
                       "webview2_acl": webview2_acl_state()[0] if WEBVIEW2 else "not-needed",
-                      "webview2_acl_note": webview2_acl_state()[1] if WEBVIEW2 else "使用系统运行时",
+                      "webview2_acl_note": (WEBVIEW2_ACL_NOTE or
+                                            (webview2_acl_state()[1] if WEBVIEW2
+                                             else "using system runtime")),
                       "picker": "win32" if os.name == "nt" else "none",
                       "frozen": bool(getattr(sys, "frozen", False)),
+                      "build": build_id(),
+                      "submit_build": SUBMIT_BUILD,
                       "problems": problems}, ensure_ascii=False, indent=2))
     return 1 if problems else 0
 
