@@ -1,0 +1,76 @@
+Microsoft Edge WebView2 Runtime — Fixed Version
+===============================================
+
+组件：Microsoft Edge WebView2 Runtime（Fixed Version，固定版，x64）
+版本：152.0.4191.53
+来源：https://msedge.sf.dl.delivery.mp.microsoft.com/filestreamingservice/files/f8ecb2c5-f486-4df5-994f-1eec63f1de23/Microsoft.WebView2.FixedVersionRuntime.152.0.4191.53.x64.cab
+原始 CAB 大小：371,824,512 字节
+原始 CAB SHA-256：f8f200b57d6a7a71d380f777f5c0ea0f71f520048add21e15737121de9ba4f68
+解压方式：expand <cab> -F:* <目录>（原样解开，548 个文件，未删改）
+版权：© Microsoft Corporation。保留所有权利。
+
+本文件是什么、不是什么
+----------------------
+本文件是**来源与归属声明 + 条款要求向最终用户提供的通知**，不是许可条款正文，
+也不替代微软的条款。条款正文请以微软官方页面为准：
+
+  MICROSOFT SOFTWARE LICENSE TERMS
+  MICROSOFT EDGE WEBVIEW2 RUNTIME (FIXED VERSION)
+  https://learn.microsoft.com/en-us/legal/configmgr/microsoft-edge-webview2
+
+（微软把 Fixed Version 的通用许可条款公布在上面这个地址。若微软日后调整入口或文本，
+以官方页面当时公布的内容为准；本文件不擅自转述、改写或以摘要代替条款。）
+
+适用条款与是否允许再分发
+------------------------
+该运行时是微软的**专有软件，不是开源软件**，不在本项目（Mortal Coach）的 MIT 许可范围内。
+本项目只做「原样附带」，不对其主张任何权利。
+
+上述条款第 2 节（DISTRIBUTABLE CODE）允许复制并分发软件的 object code，
+同时列出四项分发要求。本项目的对应做法：
+
+  1. 在应用中添加显著的主要功能
+     —— Mortal Coach 是完整的麻将复盘应用，运行时只用于渲染本应用的界面。
+  2. 要求分销商与最终用户同意不低于该协议的保护条款，并按第 8 节提供通知
+     —— 见下方「给最终用户的通知」，该通知随程序一起分发。
+  3. 所有代码必须直接从微软（含微软下载站点）获取
+     —— 本运行时取自微软官方的 Fixed Version 下载地址（见上方「来源」），
+        未经任何修改，原始 CAB 的字节数与 SHA-256 一并记录，可逐字节核对。
+  4. 就分发或使用本应用引起的索赔为微软提供抗辩与赔偿
+     —— 由本项目的分发者承担。
+
+同节还规定三条分发限制，本项目均遵守：不使用微软商标或商业外观暗示应用来自微软或
+获得微软认可（应用名、图标、界面均无 Microsoft 标识）；不修改可分发代码、不使其
+受开源许可约束；不向第三方提供微软下载站点的快捷方式。
+
+给最终用户的通知（条款第 8 节要求）
+----------------------------------
+1. 本软件包含微软提供的软件（Microsoft Edge WebView2 Runtime）。该软件可能收集最终
+   用户使用情况的信息并发送给微软，用于提供服务，详见微软隐私声明：
+   https://aka.ms/privacy
+2. 本软件包含 Microsoft Defender SmartScreen，且默认启用。SmartScreen 会按微软隐私
+   声明与《Microsoft Edge 用户数据与隐私》所述，收集并发送最终用户的信息：
+   https://learn.microsoft.com/microsoft-edge/webview2/concepts/data-privacy
+
+随包方式（不安装到系统）
+------------------------
+full 版把本运行时放在 `runtime/webview2/152.0.4191.53/`，程序启动时设置环境变量
+`WEBVIEW2_BROWSER_EXECUTABLE_FOLDER` 指向该目录，由 WebView2 加载器直接使用包内文件。
+因此：不写注册表、不复制到 Program Files、不需要管理员权限，删掉程序目录即完成卸载。
+
+Windows 10 的目录权限前提
+-------------------------
+按微软 Fixed Version 分发文档，Windows 10 上从 Fixed 120 起，未打包的 Win32 应用需要给
+该目录授予以下两条权限，否则 Renderer 进程无法启动（Windows 11 不受影响）：
+
+  icacls <目录> /grant *S-1-15-2-2:(OI)(CI)(RX)
+  icacls <目录> /grant *S-1-15-2-1:(OI)(CI)(RX)
+
+程序在 Windows 10 上启动时会自动检查并补授；补不上会改用系统 WebView2 运行时，
+两者都不可用时给出可复制的命令。详见 README「Windows 10 上的 full 版」。
+
+第三方组件
+----------
+本运行时基于 Chromium 及其他开源组件，完整清单可在包内运行：
+  runtime\webview2\152.0.4191.53\show_third_party_software_licenses.bat
+Chromium 自身的许可见 `licenses/chromium-BSD-3-Clause.txt`。

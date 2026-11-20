@@ -1,0 +1,14 @@
+# 源码运行 / 自己打包需要的依赖。版本按**随包并测试过**的那一套钉住，
+# 别写成 >= ：别人装到未验证的版本，出问题时对不齐。
+#
+#   pywebview  6.2.1  —— 界面壳，EXE 里冻结的就是这一版
+#   Pillow     13.0.0 —— 只给 scripts/ 画图用（mk_layout / make_icon）；
+#                        EXE 本身不链接 Pillow，不需要它也能启动
+#   pylnk3     0.4.3  —— 建快捷方式
+pywebview==6.2.1
+Pillow==13.0.0
+pylnk3==0.4.3
+
+# 只有「自己打 EXE」才需要，见 README「自己打一个发行包」：
+# PyInstaller==6.22.3
+# pythonnet==3.2.1        （pywebview 的 WebView2 后端依赖，冻结时自动带上）

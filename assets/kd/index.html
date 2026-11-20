@@ -1,0 +1,404 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>mortal-coach · Mortal 牌桌复盘</title>
+    <link rel="icon" href="icon.png">
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <main>
+        <div class="outer">
+            <!-- ============ 主页：选牌谱 / 粘贴链接（分析页会整块隐藏） ============ -->
+            <section class="home-view" id="home-view">
+                <header class="hv-head">
+                    <div class="hv-brand">
+                        <span class="hv-logo">mortal-coach</span>
+                        <span class="hv-tag">Mortal 牌桌 · 逐手解读</span>
+                        <button type="button" id="btn-settings" class="hv-gear" title="设置牌谱库与浏览器">⚙ 设置</button>
+                    </div>
+                    <div class="hv-sub">粘贴牌谱链接交给 Mortal 分析，或从右边挑一局已经分析过的。</div>
+                    <div class="hv-sum" id="hv-sum"></div>
+                </header>
+                <div class="hv-grid">
+                    <section class="hv-card">
+                        <h3>分析新牌谱</h3>
+                        <p class="hv-hint">雀魂 / 天凤贴链接；一番街、姬麻将贴对局 ID。</p>
+                        <div class="link-row">
+                            <input id="link-input" placeholder="粘贴 Mortal / 雀魂 / 天凤牌谱链接" spellcheck="false">
+                            <button id="link-go">分析</button>
+                        </div>
+                        <div class="sub-select">
+                            <label class="hv-field">牌谱格式
+                                <select id="fmt-select" title="牌谱来源格式">
+                                    <option value="auto">自动识别</option>
+                                    <option value="log-url">雀魂 / 天凤（链接）</option>
+                                    <option value="riichi-city-log-id">麻雀一番街（对局 ID）</option>
+                                    <option value="hime-mahjong-log-id">姬麻将（对局 ID）</option>
+                                    <option value="tenhou6">天凤6 JSON</option>
+                                </select>
+                            </label>
+                            <label class="hv-field">Mortal 模型
+                                <select id="model-select" title="Mortal 模型（rating 不能跨模型比较）">
+                                    <option value="4.1b">4.1b · 均衡</option>
+                                    <option value="4.1c">4.1c · 进攻</option>
+                                    <option value="4.1a">4.1a · 防守</option>
+                                    <option value="4.0">4.0 · 旧版</option>
+                                    <option value="3.0">3.0 · 类人</option>
+                                </select>
+                            </label>
+                            <label class="hv-field">复盘座次
+                                <select id="seat-select" title="以哪一家为复盘视角">
+                                    <option value="">自动识别</option>
+                                    <option value="0">东起（0）</option>
+                                    <option value="1">南起（1）</option>
+                                    <option value="2">西起（2）</option>
+                                    <option value="3">北起（3）</option>
+                                </select>
+                            </label>
+                        </div>
+                        <div class="link-status" id="link-status"></div>
+                        <ul class="hv-notes">
+                            <li>雀魂链接形如 <code>game.maj-soul.com/1/?paipu=…</code>，整条贴进来即可；天凤贴 <code>tenhou.net/0/?log=…</code>。</li>
+                            <li>链接里带 <code>_a…</code> 时座次自动识别；一番街对局 ID 末尾的 <code>@N</code> 就是座位。</li>
+                            <li>一次分析通常 1~5 分钟（Mortal 排队久时更慢），期间别关窗口；失败会写明卡在哪一步。</li>
+                        </ul>
+                    </section>
+                    <section class="hv-card">
+                        <h3>历史牌谱 <span class="hv-count" id="hv-count"></span></h3>
+                        <div class="history-filters">
+                            <select id="history-year"><option value="">全部年份</option></select>
+                            <select id="history-month"><option value="">全部月份</option></select>
+                            <select id="history-day"><option value="">全部日期</option></select>
+                        </div>
+                        <div id="history-list" class="history-list"></div>
+                    </section>
+                </div>
+            </section>
+            <div class="grid-main">
+                <span class="grid-hand-p0-container">
+                    <span id="discard-bars" class="discard-bars"></span>
+                    <span class="grid-hand pov-p0 grid-hand-p0">
+                        <span class="pov-p0 hand-closed-p0"></span>
+                        <span class="pov-p0 hand-calls-p0"></span>
+                    </span>
+                </span>
+                <span class="grid-hand pov-p3 grid-hand-p3">
+                    <span class="pov-p3 hand-closed-p3"></span>
+                    <span class="pov-p3 hand-calls-p3"></span>
+                </span>
+                <span class="grid-hand pov-p2 grid-hand-p2">
+                    <span class="pov-p2 hand-closed-p2"></span>
+                    <span class="pov-p2 hand-calls-p2"></span>
+                </span>
+                <span class="grid-hand pov-p1 grid-hand-p1">
+                    <span class="pov-p1 hand-closed-p1"></span>
+                    <span class="pov-p1 hand-calls-p1"></span>
+                </span>
+                <span class="grid-discard pov-p0 grid-discard-p0"></span>
+                <span class="grid-discard pov-p3 grid-discard-p3"></span>
+                <span class="grid-discard pov-p2 grid-discard-p2"></span>
+                <span class="grid-discard pov-p1 grid-discard-p1"></span>
+                <div class="grid-info">
+                    <button class="info-round"></button>
+                    <span class="info-tiles-left"></span>
+                    <span class="info-honbas"></span>
+                    <span class="info-doras"></span>
+                    <span class="gi-p0-outer"><span class="gi-p0"></span><span class="gi-p0-result"></span></span>
+                    <span class="gi-p1-outer"><span class="gi-p1"></span><span class="gi-p1-result"></span></span>
+                    <span class="gi-p2-outer"><span class="gi-p2"></span><span class="gi-p2-result"></span></span>
+                    <span class="gi-p3-outer"><span class="gi-p3"></span><span class="gi-p3-result"></span></span>
+                </div>
+            </div>
+        <div class="sidebar">
+            <div class="an-head">
+                <button type="button" id="btn-home" title="回到主页，重新选牌谱或粘贴新链接">‹ 返回牌谱选择</button>
+                <div class="rate-row">
+                    <span class="rate-num" id="rate-num">—</span>
+                    <span class="rate-sub" id="rate-sub"></span>
+                </div>
+            </div>
+            <div class="nv-box">
+                <div class="nv-head">
+                    <span>局 / 巡跳转</span>
+                    <span class="nv-legend" id="nv-legend"></span>
+                </div>
+                <div class="nv-sel">
+                    <label>局数<select id="nv-kyoku" title="选择第几局"></select></label>
+                    <label>巡目<select id="nv-junme" title="选择第几巡（标注恶手的巡会落到那一手）"></select></label>
+                </div>
+            </div>
+            <div class="controls">
+                <button id="round-dec">&lt; 上一局</button>
+                <button id="round-inc">下一局 &gt;</button>
+                <button id="prev-mismatch">&lt; 上一恶手</button>
+                <button id="next-mismatch">下一恶手 &gt;</button>
+                <button id="ply-dec2">&lt; 上一切牌</button>
+                <button id="ply-inc2">下一切牌 &gt;</button>
+                <button id="ply-dec">&lt; 后退</button>
+                <button id="ply-inc">前进 &gt;</button>
+                <button id="options">选项</button>
+                <button id="about">关于</button>
+            </div>
+            <!-- 常驻的 Mortal 候选表：填在牌桌与解读之间的这块空白里，
+                 一进牌局就能看到权重，不用翻到「候选评分」那一页。 -->
+            <div class="w-box" id="w-box">
+                <div class="w-head">
+                    <span>Mortal 的候选</span>
+                    <span class="w-meta" id="w-meta" title="Q = Mortal 对这一打的局面估值（模型自己的尺度，不是点数）；权重 = softmax(Q / τ)。Mortal 按 Q 排序，百分比只表示它有多倾向于这一打——差距大小要看 Q 差。">权重 / Q</span>
+                </div>
+                <div class="w-body" id="w-body"><span class="w-empty">—</span></div>
+                <div class="w-foot">
+                    <span><em class="mark-exp">★</em> Mortal 的选择</span>
+                    <span><em class="mark-act">·你</em> 这一手的实战</span>
+                    <span>条长 = 权重</span>
+                </div>
+            </div>
+            <div class="killer-call-div">
+                <div class="killer-call-bars"></div>
+                <img class="killer-call-img" src="media/rustferris.png">
+            </div>
+        </div>
+        <aside class="coach-panel" id="coach-panel">
+            <div class="cp-head">
+                <span class="cp-title">这一手的解读</span>
+                <span class="cp-loc" id="cp-loc"></span>
+                <span class="cp-sev" id="cp-sev">—</span>
+            </div>
+            <div class="cp-rail" id="cp-rail"></div>
+            <div class="cp-pagehead" id="cp-pagehead">
+                <span class="cp-side" id="cp-side"></span>
+                <span class="cp-pagetitle" id="cp-pagetitle"></span>
+                <span class="cp-badge" id="cp-badge"></span>
+            </div>
+            <div class="cp-body" id="cp-body">
+                <span class="cp-empty">载入中…</span>
+            </div>
+            <div class="cp-nav" id="cp-nav">
+                <button type="button" id="cp-prev">‹ 上一步</button>
+                <span class="cp-count" id="cp-count"></span>
+                <button type="button" id="cp-next">下一步 ›</button>
+            </div>
+        </aside>
+        <div class="opt-info">
+        </div>
+    </main>
+    <!-- ============ 首次进入的使用说明（localStorage 记住，可在设置里重开） ============ -->
+    <dialog id="welcome-modal" class="modal welcome-modal">
+        <div>
+            <div class="st-head">
+                <span>三分钟上手</span>
+                <button class="close welcome-close">&times;</button>
+            </div>
+            <div class="wl-body">
+                <p class="wl-lead">第一次用只有三步：<b>贴牌谱</b> → <b>等 Mortal 算完</b> → <b>逐手看解读</b>。
+                    Python 和 Node 已经随包带好；提交牌谱要用 Chrome 或 Edge
+                    （full 版用包里自带的 Chromium），界面渲染用 WebView2
+                    （Windows 11 自带，Windows 10 装过 Edge 一般也有；full 版用包里自带的固定版）。</p>
+                <ol class="wl-steps">
+                    <li><b>贴牌谱，点「分析」</b>
+                        <span>雀魂 / 天凤贴完整链接（<code>game.maj-soul.com/1/?paipu=…</code>、
+                            <code>tenhou.net/0/?log=…</code>）；一番街、姬麻将贴对局 ID，
+                            末尾的 <code>@N</code> 就是座位号。格式、模型、座次三个下拉不选也行。</span></li>
+                    <li><b>等 1~5 分钟</b>
+                        <span>程序会自己开一个看不见的浏览器过真人验证、把牌谱交给 Mortal，再把报告取回来。
+                            期间别关窗口；排队久时会慢一些。失败会写明卡在哪一步。</span></li>
+                    <li><b>看解读</b>
+                        <span>左边是牌桌，中间是 Mortal 的候选权重表（★ 是它的选择），右边是逐手解读。
+                            用 <kbd>[</kbd> <kbd>]</kbd> 或底部按钮翻页，<kbd>Home</kbd> / <kbd>End</kbd> 切上下局，
+                            <kbd>N</kbd> 跳到下一处恶手。</span></li>
+                </ol>
+                <div class="wl-note">
+                    <b>卡住了？</b>九成是网络或浏览器。在设置里勾上「显示浏览器窗口」再点一次「分析」，
+                    就能看见它停在哪一步；完整排查见程序目录下 <code>docs/5_常见问题.md</code>。
+                </div>
+            </div>
+            <div class="st-foot wl-foot">
+                <span class="wl-tip">以后可在 ⚙ 设置 →「使用说明 / 常见问题」随时打开</span>
+                <span class="wl-btns">
+                    <label class="st-check wl-never"><input type="checkbox" id="wl-never" checked>不再自动提示</label>
+                    <button type="button" id="wl-open-settings" class="st-link">先打开设置</button>
+                    <button type="button" id="wl-start">开始使用</button>
+                </span>
+            </div>
+        </div>
+    </dialog>
+    <dialog id="settings-modal" class="modal settings-modal">
+        <div>
+            <div class="st-head">
+                <span>设置</span>
+                <button class="close settings-close">&times;</button>
+            </div>
+            <div class="st-body">
+                <section class="st-sec">
+                    <h4>牌谱库</h4>
+                    <p class="st-hint">分析产生的报告、解读、对照图都存在这里。换机器时把这个目录一起拷走，
+                        或指向网盘 / 移动硬盘上的同一个目录。</p>
+                    <div class="st-row">
+                        <input id="st-lib" readonly spellcheck="false">
+                        <button type="button" id="st-pick">选择…</button>
+                        <button type="button" id="st-open">打开</button>
+                    </div>
+                    <div class="st-row st-row-2">
+                        <button type="button" id="st-reset-lib" class="st-link">恢复默认（程序目录下 library）</button>
+                        <span id="st-count" class="st-meta"></span>
+                    </div>
+                </section>
+                <section class="st-sec">
+                    <h4>提交用的浏览器</h4>
+                    <p class="st-hint">提交牌谱要过一个真人验证，程序会开一个独立的浏览器窗口。
+                        默认把它挪到屏幕外，跑完自动正常关闭，不会弹「未正常关闭」。</p>
+                    <label class="st-check"><input type="checkbox" id="st-show-browser">
+                        提交时把浏览器窗口显示出来（想自己过验证码时勾上）</label>
+                    <div class="st-row">
+                        <input id="st-chrome" placeholder="留空 = 自动查找 Chrome / Edge" spellcheck="false">
+                        <button type="button" id="st-chrome-pick">选择…</button>
+                    </div>
+                    <p class="st-hint">Chrome、Edge 都会自动找；Brave / Vivaldi / 360 极速等
+                        Chromium 内核浏览器也能用，点「选择…」指到它的 exe 即可（Firefox 不行）。</p>
+                </section>
+                <section class="st-sec">
+                    <h4>恶手门槛与档位 · 权重差</h4>
+                    <p class="st-hint">权重差 = 权重表里 <b>Mortal 首选那张</b>与<b>你实战那张</b>的百分比之差
+                        （它 75%、你 25%，就是 50pt）。<br>
+                        <b>门槛以上全部算恶手</b>：都出解读、都给巡目上色、都计入「· 恶手 N 处」、都能跳过去；
+                        门槛之下不进库，页面也翻不到。</p>
+                    <div class="st-row st-row-2 st-bad-nums">
+                        <label for="st-bad-thresh">门槛 ≥</label>
+                        <input id="st-bad-thresh" type="number" step="1" min="1" max="100" spellcheck="false">
+                        <label for="st-bad-g-severe">严重 ≥</label>
+                        <input id="st-bad-g-severe" type="number" step="1" min="0" max="100" spellcheck="false">
+                    </div>
+                    <p class="st-hint">填百分比。门槛之上只分两档，<b>都算恶手，只是颜色不同</b>：
+                        ≥ 严重 染红，门槛到严重之间染橙；默认 10 / 50。权重差 90% 以上会饱和
+                        （Q 差 0.3 与 0.9 都可能是 99 对 1），所以它只分轻重，不衡量亏多少。</p>
+                    <p class="st-hint st-bad-count" id="st-bad-count"></p>
+                    <p class="st-hint">改门槛只对<b>之后重算</b>的牌谱生效：保存后跑一次「一键重建解读.bat」补缺
+                        （或 rebuild.bat 全量重算）。</p>
+                </section>
+                <section class="st-sec">
+                    <h4>损失程度 · 期望损失 Q</h4>
+                    <p class="st-hint">Q 差 = Q(最优) − Q(实战)，直接反映这一手<b>真正亏掉多少</b>
+                        （模型自己的尺度，不是点数）。它没有上限，所以能分出「权重差都是 100%」的两手谁更贵。<br>
+                        只影响解读面板右上角的「损失 严重 / 中等 / 轻微」，<b>不改巡目颜色</b>，也不影响「恶手 N 处」。</p>
+                    <div class="st-row st-row-2 st-bad-nums">
+                        <label for="st-bad-q-severe">严重 ≥</label>
+                        <input id="st-bad-q-severe" type="number" step="0.05" min="0" max="5" spellcheck="false">
+                        <label for="st-bad-q-medium">中等 ≥</label>
+                        <input id="st-bad-q-medium" type="number" step="0.05" min="0" max="5" spellcheck="false">
+                    </div>
+                    <p class="st-hint">一手完全可能是「权重差 100pt · 损失 轻微」：Mortal 极度确信该打那张，
+                        但两张牌其实差不多，换一下几乎不亏。</p>
+                </section>
+                <details class="st-sec st-adv">
+                    <summary>高级：运行时路径</summary>                    <div class="st-row"><label>Python</label>
+                        <input id="st-python" placeholder="留空 = 包内 runtime/python" spellcheck="false"></div>
+                    <div class="st-row"><label>Node</label>
+                        <input id="st-node" placeholder="留空 = 包内 runtime/node" spellcheck="false"></div>
+                    <p class="st-hint" id="st-env"></p>
+                </details>
+            </div>
+            <div class="st-foot">
+                <span id="st-msg"></span>
+                <span class="st-foot-right">
+                    <button type="button" id="st-help" class="st-link">使用说明 / 常见问题</button>
+                    <button type="button" id="st-save">保存</button>
+                </span>
+            </div>
+        </div>
+    </dialog>
+    <dialog id="about-modal" class="modal">
+        <div>
+        <button class="close about-close">&times</button>
+        <div id="about-body-0"></div>
+        <div class="about-metadata"></div>
+        <p></p>
+        <div id="about-body-1"></div>
+        </div>
+    </dialog>
+    <dialog id="options-modal" class="modal">
+        <div class="options-div">
+            <div class="options-header">
+                <span id="options-label"></span><button class="close options-close">&times</button>
+            </div>
+            <div>
+                <label for="langSelect" id="langLabel"></label>
+                <select id="langSelect" name="lang">
+                    <option value="zh-CN" selected>简体中文</option>
+                    <option value="en">English</option>
+                    <option value="ja">日本語</option>
+                    <option value="ko">한국어</option>
+                    <option value="ru">Русский</option>
+                </select>
+            </div>
+            <button id="toggle-hands"></button>
+            <button id="toggle-mortal-advice"></button>
+            <button id="toggle-dealin-rate"></button>
+            <button id="toggle-error-threshold"></button>
+        </div>
+    </dialog>
+    <dialog class="modal info-round-modal">
+        <div>
+        <button class="close info-round-close">&times</button>
+        </div>
+        <div class="info-round-table"></div>
+    </dialog>
+    <dialog class="modal info-this-round-modal">
+        <button class="close info-this-round-close">&times</button>
+        <div class="info-this-round-table"></div>
+    </dialog>
+    <dialog id="generic-modal" class="modal">
+        <div>
+            <span>
+                <h2 class="title">Modal Title</h2>
+                <button id="generic-modal-close" class="close">&times</button>
+            </span>
+            <div id="generic-modal-body" class="generic-modal-body"></div>
+        </div>
+    </dialog>
+    <script src="i18next.min.js"></script>
+    <script src="translations.js"></script>
+    <script src="badlevel.js"></script>
+    <script type="module" src="boot.js"></script>
+    <script>
+    // 持续高亮：hlm = Mortal 建议打的牌，hly = 你实际打出的牌（红框 / 蓝框）
+    (function () {
+        var p = new URLSearchParams(location.search);
+        var hm = p.get('hlm'), hy = p.get('hly');
+        if (!hm && !hy) return;
+        var s = document.createElement('style');
+        s.textContent = '.kd-hl-mortal{box-shadow:inset 0 0 0 4px hsl(0,88%,56%) !important;}'
+                      + '.kd-hl-you{box-shadow:inset 0 0 0 4px hsl(210,95%,58%) !important;}';
+        document.head.appendChild(s);
+        function cand(t) { var a = [t]; if (t && t[0] === '5' && t.length === 2) a.push('0' + t[1]); return a; }
+        function apply() {
+            var box = [].slice.call(document.querySelectorAll('.hand-closed-p0 > div > img'));
+            if (!box.length) return;
+            var used = [];
+            function mark(t, cls) {
+                if (!t) return false;
+                var cs = cand(t);
+                for (var ci = 0; ci < cs.length; ci++) {
+                    for (var i = 0; i < box.length; i++) {
+                        var im = box[i];
+                        if (used.indexOf(im) >= 0) continue;
+                        var src = im.getAttribute('src') || '';
+                        if (src.slice(-(cs[ci].length + 5)) === '/' + cs[ci] + '.svg') {
+                            im.classList.add(cls); used.push(im); return true;
+                        }
+                    }
+                }
+                return false;
+            }
+            box.forEach(function (im) { im.classList.remove('kd-hl-mortal'); im.classList.remove('kd-hl-you'); });
+            used = [];
+            mark(hm, 'kd-hl-mortal'); mark(hy, 'kd-hl-you');
+        }
+        setInterval(apply, 150);
+        document.addEventListener('DOMContentLoaded', apply);
+        apply();
+    })();
+    </script>
+</body>
+</html>
