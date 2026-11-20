@@ -3293,6 +3293,7 @@ const SUBMIT_STAGE_CN = {
     STARTING: '正在启动浏览器',
     BROWSER_STARTING: '正在启动浏览器',
     AWAITING_VERIFICATION: '等待你在浏览器里完成人机验证',
+    VERIFICATION_FAILED: '人机验证失败，可以重新加载验证或改用普通浏览器',
     SUBMITTING: '正在提交到 Mortal',
     SCORING: 'Mortal 正在评分',
     DOWNLOADING: '正在下载报告',
@@ -3304,6 +3305,13 @@ let SUBMIT_POLL = 0
 function submitActions(show) {
     const bar = document.getElementById('submit-actions')
     if (bar) bar.hidden = !show
+}
+
+function submissionBusy(busy) {
+    for (const id of ['link-go', 'sb-resume', 'sb-retry', 'sb-official']) {
+        const el = document.getElementById(id)
+        if (el) el.disabled = busy
+    }
 }
 
 function stopSubmitPoll() {
@@ -3324,10 +3332,12 @@ function startSubmitPoll(st, head) {
         let txt = `${head} … ${label}`
         if (s.wait) txt += ` · 已等 ${s.wait}s`
         if (s.detail) txt += `（${s.detail}）`
-        const wait = s.stage === 'AWAITING_VERIFICATION'
+        const wait = ['AWAITING_VERIFICATION', 'VERIFICATION_FAILED'].includes(s.stage)
         st.className = 'link-status ' + (wait ? 'warn' : 'busy')
         st.textContent = txt
         submitActions(wait)
+        const retry = document.getElementById('sb-retry')
+        if (retry) retry.disabled = !wait || s.stage === 'VERIFICATION_FAILED'
     }, 1000)
 }
 
@@ -3352,7 +3362,7 @@ async function openReport(tag) {
 // 统一的收尾：verification_pending 不是失败，只是还没做完
 async function applySubmitResult(r, st) {
     if (!r) { st.className = 'link-status bad'; st.textContent = '没有返回结果'; return }
-    if (r.status === 'verification_pending') {
+    if (r.status === 'verification_pending' || r.status === 'verification_failed') {
         st.className = 'link-status warn'
         st.textContent = (r.msg || '需要你在浏览器里点一下人机验证')
             + (r.tag ? `　（标签 ${r.tag}）` : '')
@@ -3394,7 +3404,7 @@ async function submitLink() {
     const seat = (document.getElementById('seat-select') || {}).value || ''
     st.className = 'link-status busy'
     st.textContent = `提交 Mortal（${model}）… 正在启动浏览器`
-    if (go) go.disabled = true
+    submissionBusy(true)
     submitActions(false)
     startSubmitPoll(st, `提交 Mortal（${model}）`)
     try {
@@ -3406,21 +3416,23 @@ async function submitLink() {
         st.textContent = '出错：' + ((e && e.message) || e)
     } finally {
         stopSubmitPoll()
-        if (go) go.disabled = false
+        submissionBusy(false)
     }
 }
 
 // 继续等待：同一浏览器、同一页面，不重新开始
-async function resumeSubmit() {
+async function resumeSubmit(reload = false) {
     const st = document.getElementById('link-status')
     if (!st) return
     const api = (window.pywebview || {}).api || {}
-    if (!api.resume_submit) return
+    const fn = reload ? api.retry_verification : api.resume_submit
+    if (!fn) return
+    submissionBusy(true)
     st.className = 'link-status busy'
-    st.textContent = '继续等待验证…'
+    st.textContent = reload ? '重新加载验证页面…' : '继续等待验证…'
     startSubmitPoll(st, '继续等待验证')
     try {
-        const r = await api.resume_submit()
+        const r = await fn()
         stopSubmitPoll()
         await applySubmitResult(r, st)
     } catch (e) {
@@ -3428,6 +3440,7 @@ async function resumeSubmit() {
         st.textContent = '出错：' + ((e && e.message) || e)
     } finally {
         stopSubmitPoll()
+        submissionBusy(false)
     }
 }
 
@@ -3443,7 +3456,26 @@ function wireSubmitActions() {
         const r = await fn()
         if (st && r) { st.className = 'link-status ' + (r.ok ? 'busy' : 'bad'); st.textContent = r.msg || '' }
     }
-    if (resume) resume.onclick = resumeSubmit
+    if (resume) resume.onclick = () => resumeSubmit(false)
+    const retry = document.getElementById('sb-retry')
+    if (retry) retry.onclick = async () => {
+        const s = await api().get_submit_status()
+        if (!s.active) return resumeSubmit(true)
+        retry.disabled = true
+        const r = await api().request_verification_reload()
+        if (st) { st.className = 'link-status warn'; st.textContent = r.msg || '' }
+    }
+    const official = document.getElementById('sb-official')
+    if (official) official.onclick = async () => {
+        const fn = api().open_official_review
+        if (!fn) return
+        submissionBusy(true)
+        try {
+            const r = await fn((document.getElementById('link-input') || {}).value || '')
+            if (r.ok) { stopSubmitPoll(); submitActions(false) }
+            if (st) { st.className = 'link-status ' + (r.ok ? 'warn' : 'bad'); st.textContent = r.msg || '' }
+        } finally { submissionBusy(false) }
+    }
     if (cancel) cancel.onclick = async () => {
         const fn = api().cancel_submit
         if (fn) await fn()

@@ -1097,11 +1097,11 @@ class TestSubmitLifecycle(unittest.TestCase):
         self.assertIsNotNone(m)
         self.assertEqual(int(m.group(1)), M.SUBMIT_BUILD)
 
-    def test_manual_wait_never_refreshes_challenge(self):
-        """人工验证期间刷新 = 把用户正在做的验证重置掉，绝不能有。"""
+    def test_manual_wait_has_no_automated_challenge_clicks(self):
+        """只接受用户明确请求的重载，不派发验证鼠标点击。"""
         js = (BASE / "tools" / "submit_auto.mjs").read_text(encoding="utf-8")
-        manual = js.split("if (SHOW) {", 1)[1].split("// 无人值守", 1)[0]
-        self.assertNotIn("Page.navigate", manual)
+        self.assertNotIn("Input.dispatchMouseEvent", js)
+        self.assertNotIn("clickWidget", js)
         self.assertIn("VERIFICATION_PENDING", js)
 
     def test_token_scoped_to_review_form(self):

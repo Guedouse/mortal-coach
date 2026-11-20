@@ -14,7 +14,7 @@
 //   NO_PAGE / NO_TOKEN / NO_FORM / NO_REPORT_URL / REPORT_TIMEOUT / REPORT_URL
 //   EXC     | ...            Runtime.evaluate 抛异常
 // 退出码：0 成功或 dry 完成 / 1 无页面 / 2 无 token / 3 填表异常 / 4 未拿到报告页
-const BUILD = 4;   // 与 app/main.py 的 SUBMIT_BUILD 必须一致；Python 会核对
+const BUILD = 5;   // 与 app/main.py 的 SUBMIT_BUILD 必须一致；Python 会核对
 const PORT = process.env.CDP_PORT || 9222;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 console.log('SCRIPT_BUILD', BUILD);
@@ -64,6 +64,7 @@ const FIELD = {
 }[FORMAT] || 'log-url';
 
 import { isReportUrl } from './url_rules.mjs';
+import { installVerificationObserver, verificationFailure } from './verification_state.mjs';
 
 const list = await (await fetch(`http://127.0.0.1:${PORT}/json/list`)).json();
 const pages = list.filter((t) => t.type === 'page');
@@ -108,6 +109,12 @@ const done = (code) => { try { ws.close(); } catch {} process.exit(code); };
 const isToken = (v) => typeof v === 'string' && v.length > 50
   && !v.startsWith('CDPERR') && !v.startsWith('EXC');
 
+await send('Page.enable');
+// Register before a future navigation and observe the currently loaded page too.
+const observerSource = `(${installVerificationObserver.toString()})()`;
+await send('Page.addScriptToEvaluateOnNewDocument', { source: observerSource });
+await ev(observerSource);
+
 // ---------------- 单轮里的四步 ----------------
 
 // 先确保停在首页：Turnstile 只挂在首页表单上，停在报告页永远拿不到 token。
@@ -115,6 +122,18 @@ const isToken = (v) => typeof v === 'string' && v.length > 50
 // 连 turnstile 的 token 都还是上一轮那个（token 一次性，服务器会判 invalid captcha）。
 let navSeq = 0;
 async function gotoHome() {
+  // ensure_chrome already opens HOME; settings may have completed verification.
+  // Reuse this document, including a still-loading challenge, on the first run.
+  if (navSeq === 0 && !cfg.reload) {
+    for (let i = 0; i < 24; i++) {
+      const state = await pageState();
+      let atHome = false;
+      try { const u = new URL(state.url); atHome = u.origin === new URL(HOME).origin && u.pathname === '/'; } catch {}
+      if (!atHome) break;
+      if (state.form) { navSeq++; console.log('REUSE_HOME'); return true; }
+      await sleep(600);
+    }
+  }
   const url = navSeq++ ? `${HOME}?retry=${Date.now()}` : HOME;
   try {
     await send('Page.enable');
@@ -150,13 +169,11 @@ async function gotoHome() {
 //   ① 首页压根没打开（断网 / 代理拦了）→ form=false
 //   ② 首页开了但 challenges.cloudflare.com 的脚本没加载 → cf=false
 //   ③ 脚本加载了，但 Cloudflare 这次要人工点「确认您是真人」→ widget=true 却迟迟没 token
-// ③ 是可以自己救回来的：先把窗口挪到屏幕外时没人能点，所以脚本会
-//   自动在验证框位置派发一次鼠标点击（CDP 的输入是受信任事件），
-//   还不行就把窗口搬到屏幕正面，让用户自己点。
+// 需要人工验证时显示窗口；不派发验证点击、不定时重载挑战。
 
 async function pageState() {
   const raw = await ev(`(()=>{
-    const w = document.querySelector('.cf-turnstile, #cf-turnstile, [data-sitekey]');
+    const w = (document.forms.reviewForm || document).querySelector('.cf-turnstile, #cf-turnstile, [data-sitekey]');
     let box = null;
     try { const b = w && w.getBoundingClientRect(); if (b && b.width) {
       box = [Math.round(b.x), Math.round(b.y), Math.round(b.width), Math.round(b.height)]; } } catch (e) {}
@@ -170,6 +187,7 @@ async function pageState() {
       title: (document.title || '').slice(0, 40),
       ready: document.readyState,
       form: !!rf,
+      failure: window.__mcVerification && window.__mcVerification.failure,
       widget: !!w, box: box,
       token: els.length, tlen: els.map((e) => (e.value || '').length).join(','),
       rtoken: rels.length, rtlen: rels.map((e) => (e.value || '').length).join(','),
@@ -192,7 +210,7 @@ async function pageState() {
 // —— 之前日志里 box 一直是 y=1194（视口才 667 高），点下去等于点空气，就是这个原因。
 // 所以每滚一次都要等滚动落定再重新量，量到真的在视口里才返回。
 async function bringWidgetIntoView() {
-  const read = `(()=>{const d=document.querySelector('.cf-turnstile, #cf-turnstile, [data-sitekey]');
+  const read = `(()=>{const d=(document.forms.reviewForm || document).querySelector('.cf-turnstile, #cf-turnstile, [data-sitekey]');
     if(!d)return '';const b=d.getBoundingClientRect();
     return JSON.stringify([b.top,b.left,b.width,b.height,innerHeight]);})()`;
   for (let i = 0; i < 5; i++) {
@@ -211,28 +229,6 @@ async function bringWidgetIntoView() {
   return null;
 }
 
-async function clickWidget() {
-  const b = await bringWidgetIntoView();
-  if (!b) return 'no_widget';
-  const [, , w, h, vh] = b;
-  if (b[1] + h / 2 < 0 || b[1] + h / 2 > vh) {
-    return `out_of_view:${Math.round(b[0])},${Math.round(b[1])}/${vh}`;
-  }
-  // Turnstile 控件在 shadow DOM 里（查不到 iframe），但 300x65 的框贴在容器左上，
-  // 复选框就在左边约 30px 处；再补一下正中（有时要的是整块区域）。
-  const pts = [[b[1] + 30, b[0] + h / 2], [b[1] + w / 2, b[0] + h / 2]];
-  for (const [x, y] of pts) {
-    try {
-      await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y });
-      await send('Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'left', buttons: 1, clickCount: 1 });
-      await sleep(90);
-      await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', buttons: 0, clickCount: 1 });
-    } catch (e) { return 'click_error'; }
-    await sleep(500);
-  }
-  return `clicked@${Math.round(b[1])},${Math.round(b[0])}`;
-}
-
 // 把窗口从屏幕外搬回来，并请求聚焦（窗口是 offscreen 时没人能点验证框）
 async function showWindow() {
   try {
@@ -248,8 +244,7 @@ async function showWindow() {
   }
 }
 
-// 每轮：等着 → 到点自己点一下 → 到点把窗口弹出来给人点 → 到点刷新重来
-// （不要一开始就刷新，刷新会把已经等到的进度丢掉）
+// 只复用浏览器会话；token 一次性使用。
 const usedTokens = new Set();
 // 只认 reviewForm 里的响应；找不到表单时才退回全页面（此时也不会真的提交）
 const readToken = () => ev(`(()=>{
@@ -263,70 +258,78 @@ const readToken = () => ev(`(()=>{
 // 人工等待上限（秒）。默认 5 分钟，够点一次验证；超时只是把控制权交回，
 // 浏览器和页面都不关，用户可以选择「继续等待」接着等。
 const MANUAL_WAIT = Math.max(60, Number(cfg.wait || 300));
+let waitingForVerification = false;
+let reloadRequested = false;
+let controlBuffer = '';
+process.stdin.setEncoding('utf8');
+process.stdin.on('data', chunk => {
+  controlBuffer += chunk;
+  const lines = controlBuffer.split('\n');
+  controlBuffer = lines.pop();
+  for (const line of lines) {
+    if (line.trim() === 'reload-verification' && waitingForVerification) reloadRequested = true;
+  }
+});
 
 async function waitToken() {
+  // A valid token on an already verified settings page is consumed immediately.
+  const existing = await readToken();
+  if (isToken(existing) && !usedTokens.has(existing)) { usedTokens.add(existing); return existing; }
   if (SHOW) {
-    // 人工模式：把窗口摆到正面、验证框滚进视野，然后**只等**。
-    // 不自动点（点不对反而会把挑战弄成「正在验证…」卡死），
-    // 也不定时刷新（刷新等于把用户正在做的验证重置掉）。
     console.log('WINDOW_SHOWN 0', await showWindow());
-    console.log('WIDGET_IN_VIEW', JSON.stringify(await bringWidgetIntoView()));
-    console.log('NEED_MANUAL', '浏览器窗口已打开：请点一下「确认您是真人」，点完会自动继续');
-    console.log('VERIFICATION_REQUIRED manual');
-    const t0 = Date.now();
-    let nextLog = 0;
-    for (let i = 0; i < MANUAL_WAIT; i++) {
-      const tok = await readToken();
-      if (isToken(tok) && !usedTokens.has(tok)) { usedTokens.add(tok); return tok; }
-      const sec = Math.round((Date.now() - t0) / 1000);
-      if (sec >= nextLog) {
-        nextLog = sec + 15;
-        const st = await pageState();
-        console.log('TOKEN_WAIT', 0, sec + 's',
-                    JSON.stringify({ form: st.form, widget: st.widget, api: st.api,
-                                     cf: st.cf, rtoken: st.rtoken, rtlen: st.rtlen,
-                                     vis: st.vis }));
-      }
-      await sleep(1000);
-    }
-    console.log('VERIFICATION_TIMEOUT', MANUAL_WAIT);
-    return '';
+  } else {
+    // Even when background analysis is selected, manual verification must be visible.
+    console.log('WINDOW_SHOWN 0', await showWindow());
   }
-
-  // 无人值守：两轮，到点自动点一下；只有轮次之间才刷新页面
-  const rounds = [{ wait: 90, click: 12, show: 40 }, { wait: 80, click: 8, show: 22 }];
-  for (let round = 0; round < rounds.length; round++) {
-    const t0 = Date.now();
-    let clicked = false, shown = false, nextLog = 0;
-    for (let i = 0; i < rounds[round].wait; i++) {
-      const tok = await readToken();
-      // 用过的 token 不能再交：Turnstile 一次性，复用只会换来「invalid captcha response」
-      if (isToken(tok) && !usedTokens.has(tok)) { usedTokens.add(tok); return tok; }
-      const sec = Math.round((Date.now() - t0) / 1000);
-      if (!clicked && sec >= rounds[round].click) {
-        clicked = true;
-        console.log('TOKEN_CLICK', round, await clickWidget());
+  console.log('WIDGET_IN_VIEW', JSON.stringify(await bringWidgetIntoView()));
+  console.log('NEED_MANUAL', '请在浏览器中完成人机验证；若显示验证失败，可返回应用重新加载验证，或改用普通浏览器');
+  console.log('VERIFICATION_REQUIRED manual');
+  waitingForVerification = true;
+  const t0 = Date.now();
+  let nextLog = 0;
+  for (let i = 0; i < MANUAL_WAIT; i++) {
+    if (reloadRequested) {
+      reloadRequested = false;
+      // This branch is reachable only while waiting, before any form submission.
+      const current = await pageState();
+      let atHome = false;
+      try { const u = new URL(current.url); atHome = u.origin === new URL(HOME).origin && u.pathname === '/'; } catch {}
+      if (!atHome || !current.form) {
+        console.log('VERIFICATION_FAILED unknown');
+        waitingForVerification = false;
+        return '';
       }
-      if (!shown && sec >= rounds[round].show) {
-        shown = true;
-        console.log('WINDOW_SHOWN', round, await showWindow());
-        console.log('VERIFICATION_REQUIRED auto_window');
-        console.log('NEED_MANUAL', '如果看到「确认您是真人」，请手动点一下');
+      console.log('VERIFICATION_RELOADING user_requested');
+      await send('Page.navigate', { url: HOME });
+      for (let n = 0; n < 24; n++) {
+        await sleep(600);
+        if ((await pageState()).form) break;
       }
-      if (sec >= nextLog) {
-        nextLog = sec + 15;
-        const st = await pageState();
-        console.log('TOKEN_WAIT', round, sec + 's',
-                    JSON.stringify({ form: st.form, widget: st.widget, api: st.api,
-                                     cf: st.cf, rtoken: st.rtoken, rtlen: st.rtlen,
-                                     vis: st.vis }));
-      }
-      await sleep(1000);
+      await bringWidgetIntoView();
+      console.log('VERIFICATION_REQUIRED manual');
+      i = 0;
     }
-    console.log('TOKEN_RETRY', round, JSON.stringify(await pageState()));
-    try { await send('Page.navigate', { url: `${HOME}?retry=${Date.now()}` }); } catch (e) {}
-    await sleep(6000);
+    const tok = await readToken();
+    if (isToken(tok) && !usedTokens.has(tok)) { waitingForVerification = false; usedTokens.add(tok); return tok; }
+    const st = await pageState();
+    const failure = verificationFailure(st);
+    if (failure) {
+      console.log('VERIFICATION_FAILED', failure);
+      waitingForVerification = false;
+      return '';
+    }
+    const sec = Math.round((Date.now() - t0) / 1000);
+    if (sec >= nextLog) {
+      nextLog = sec + 15;
+      console.log('TOKEN_WAIT', 0, sec + 's', JSON.stringify({
+        form: st.form, widget: st.widget, api: st.api, cf: st.cf,
+        rtoken: st.rtoken, rtlen: st.rtlen, vis: st.vis,
+      }));
+    }
+    await sleep(1000);
   }
+  console.log('VERIFICATION_TIMEOUT', MANUAL_WAIT);
+  waitingForVerification = false;
   return '';
 }
 
@@ -426,7 +429,14 @@ async function waitReport() {
 let last = null;
 for (let attempt = 1; attempt <= (RESUME ? 1 : MAX_TRY); attempt++) {
   console.log('ATTEMPT', attempt + '/' + (RESUME ? 1 : MAX_TRY));
-  if (RESUME) {
+  if (cfg.reload) {
+    // Only a user-requested retry may discard a challenge. Never interrupt a POST/report.
+    const state = await pageState();
+    let atHome = false;
+    try { const u = new URL(state.url); atHome = u.origin === new URL(HOME).origin && u.pathname === '/'; } catch {}
+    if (!atHome || !state.form) { console.log('RELOAD_REFUSED not_at_review_form'); done(4); }
+    if (!(await gotoHome())) done(1);
+  } else if (RESUME) {
     // 接续上一轮：页面还是原样，直接等 token，绝不重新导航
     console.log('RESUME', await ev('location.href'));
     console.log('PAGE_STATE', JSON.stringify(await pageState()));
@@ -436,7 +446,7 @@ for (let attempt = 1; attempt <= (RESUME ? 1 : MAX_TRY); attempt++) {
 
   // 自测钩子：只验证「点验证框 / 把窗口搬回屏幕」这两个动作能不能用
   if (process.env.MC_WINDOW_TEST === '1') {
-    console.log('CLICK', await clickWidget());
+    console.log('WIDGET_IN_VIEW', JSON.stringify(await bringWidgetIntoView()));
     console.log('SHOW', await showWindow());
     done(0);
   }
@@ -449,7 +459,7 @@ for (let attempt = 1; attempt <= (RESUME ? 1 : MAX_TRY); attempt++) {
       console.log('NO_TOKEN len=0');
       // 人工模式下超时不是「失败」，而是「还没做完」：浏览器、profile、页面都留着，
       // Python 据此返回可恢复状态，用户点「继续等待」就在同一页面上接着等。
-      if (SHOW) console.log('VERIFICATION_PENDING', 'window_kept_open');
+      console.log('VERIFICATION_PENDING', 'window_kept_open');
       done(2);
     }
     console.log('TOKEN_OK len=' + tok.length);

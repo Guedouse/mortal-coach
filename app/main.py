@@ -997,7 +997,7 @@ CHROME_VER = ""
 # 「源码修好了、EXE 还是旧的」这种混合状态，所以把身份显式报出来：
 #   - EXE 构建时间取可执行文件自身的修改时间（改名/重打包必然变化）
 #   - 外置 JS 自带 SCRIPT_BUILD，两边不一致时日志与设置里直接标红
-SUBMIT_BUILD = 4          # 必须与 tools/submit_auto.mjs 的 BUILD 一致
+SUBMIT_BUILD = 5          # 必须与 tools/submit_auto.mjs 的 BUILD 一致
 # 勾了「显示浏览器」时等用户点验证的上限（秒）。MC_MANUAL_WAIT 只给排查/自测用。
 MANUAL_WAIT_SEC = int(os.environ.get("MC_MANUAL_WAIT") or 300)
 APP_BUILD = "2026-11-21"  # 源码构建号，发版时更新
@@ -1080,6 +1080,7 @@ def submit_stage_of(line):
     for key, stage in (("NEED_MANUAL", "AWAITING_VERIFICATION"),
                        ("VERIFICATION_REQUIRED", "AWAITING_VERIFICATION"),
                        ("VERIFICATION_TIMEOUT", "AWAITING_VERIFICATION"),
+                       ("VERIFICATION_FAILED", "VERIFICATION_FAILED"),
                        ("TOKEN_OK", "SUBMITTING"),
                        ("SUBMIT_URL", "SUBMITTING"),
                        ("SUBMIT ", "SUBMITTING"),
@@ -2011,6 +2012,7 @@ class Api:
         """
         import queue as _queue
         proc = subprocess.Popen([NODE, str(TOOLS / "submit_auto.mjs"), cfg],
+                                stdin=subprocess.PIPE,
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                 text=True, encoding="utf-8", errors="replace",
                                 cwd=str(TOOLS), env=child_env(),
@@ -2079,6 +2081,9 @@ class Api:
                             pass
                 elif ln.startswith("VERIFICATION_TIMEOUT"):
                     submit_state_set(resumable=True)
+                elif ln.startswith("VERIFICATION_FAILED"):
+                    submit_state_set(detail="验证失败，可重新加载验证或改用普通浏览器",
+                                     resumable=True)
         finally:
             self._node_proc = None
             try:
@@ -2203,6 +2208,27 @@ class Api:
 
     def resume_submit(self):
         """继续等待人工验证：同一浏览器、同一页面、同一个标签，不重新开始。"""
+        return self._resume_verification(False)
+
+    def retry_verification(self):
+        """用户主动要求重载验证；仅允许没有在提交的待验证任务。"""
+        return self._resume_verification(True)
+
+    def request_verification_reload(self):
+        """通知正在等验证的脚本重载；脚本在提交前再次核对页面。"""
+        st = submit_state_get()
+        proc = self._node_proc
+        if (not st.get("active") or st.get("stage") != "AWAITING_VERIFICATION"
+                or proc is None or proc.poll() is not None or proc.stdin is None):
+            return {"ok": False, "msg": "当前不在等待验证；请稍后重试，提交或评分期间不能重载。"}
+        try:
+            proc.stdin.write("reload-verification\n")
+            proc.stdin.flush()
+            return {"ok": True, "msg": "已请求重新加载验证；请在浏览器中完成验证。"}
+        except (OSError, ValueError):
+            return {"ok": False, "msg": "验证任务已经结束，请使用「重新加载验证」重试。"}
+
+    def _resume_verification(self, reload_page):
         p = self._pending or {}
         if not p:
             return {"ok": False, "status": "failed", "stage": "NO_PENDING",
@@ -2215,9 +2241,32 @@ class Api:
                     "msg": "用于验证的浏览器已经关掉了，点「分析」重新开始这一次。"}
         return self._submit_guarded(p.get("url", ""), p.get("fmt", "auto"),
                                     p.get("model", "4.1b"), p.get("seat", ""),
-                                    tag=p.get("tag") or None, resume=True)
+                                    tag=p.get("tag") or None, resume=True,
+                                    reload_verification=reload_page)
 
-    def _submit_guarded(self, url, fmt, model, seat, tag=None, resume=False):
+    def open_official_review(self, url=""):
+        """在用户默认浏览器打开官网，沿用其正常浏览环境；不读取其资料。"""
+        if not self._begin_op("切换到普通浏览器"):
+            return {"ok": False, "msg": "请先取消当前分析，再切换到普通浏览器。"}
+        try:
+            value = normalize_pasted_input(url)
+            target = "https://mjai.ekyu.moe/"
+            if re.match(r"^https?://", value, re.I):
+                from urllib.parse import urlencode
+                target += "?" + urlencode({"url": value})
+            # 用户明确选择切换路径，停止旧的待验证任务，避免两个入口同时提交。
+            self.cancel_submit()
+            import webbrowser
+            if not webbrowser.open(target, new=2):
+                return {"ok": False, "msg": "未能打开默认浏览器，请手动打开 https://mjai.ekyu.moe/"}
+            return {"ok": True, "msg": "已打开普通浏览器。请核对模型和座次并生成报告，再复制最终报告页地址回到输入框，点「分析」。"}
+        except Exception as e:
+            return {"ok": False, "msg": f"打开普通浏览器失败：{e}"}
+        finally:
+            self._end_op()
+
+    def _submit_guarded(self, url, fmt, model, seat, tag=None, resume=False,
+                        reload_verification=False):
         if not LIB_EXCLUSIVE:
             # 不能直接 raise：这是在 try 之外，前端只会看到一个没有 stage 的失败，
             # 页面显示不出「该干什么」。统一返回结构化结果。
@@ -2232,14 +2281,16 @@ class Api:
         # 先把上一轮的状态清干净：否则续等时会闪一下上次的「已等 45s」和旧阶段
         submit_state_reset((self._pending or {}).get("tag", ""))
         try:
-            return self._submit(url, fmt, model, seat, tag=tag, resume=resume)
+            return self._submit(url, fmt, model, seat, tag=tag, resume=resume,
+                                reload_verification=reload_verification)
         except ReportError as e:
             out = {"ok": False, "status": "failed", "stage": e.code,
                    "msg": e.msg, "error_code": e.code}
-            if e.code == "VERIFICATION_PENDING":
+            if e.code in ("VERIFICATION_PENDING", "VERIFICATION_FAILED"):
                 # 不是失败：验证还没做完。浏览器、profile、页面全部留着，
                 # 用户点「继续等待」就在同一页面上接着等。
-                out.update({"status": "verification_pending", "resumable": True,
+                out.update({"status": ("verification_failed" if e.code == "VERIFICATION_FAILED"
+                                       else "verification_pending"), "resumable": True,
                             "tag": (self._pending or {}).get("tag", ""),
                             "wait": (self._pending or {}).get("waited", 0),
                             "browser": CHROME or "", "browser_state": CHROME_STATE})
@@ -2255,7 +2306,8 @@ class Api:
             self._end_op()
             submit_state_set(active=False)
 
-    def _submit(self, url, fmt, model, seat, tag=None, resume=False):
+    def _submit(self, url, fmt, model, seat, tag=None, resume=False,
+                reload_verification=False):
         logs = []
         t0 = time.time()
 
@@ -2342,6 +2394,7 @@ class Api:
                               "seat": seat, "kyokus": "", "tempo": "",
                               "show": bool(CONFIG.get("show_browser")),
                               "resume": bool(resume),
+                              "reload": bool(reload_verification),
                               "wait": MANUAL_WAIT_SEC}, ensure_ascii=False)
             say(f"提交到 Mortal（标签 {tag}）…")
             out = self._run_submit_node(cfg, logs, tag)
@@ -2354,11 +2407,20 @@ class Api:
                 self._keep_chrome = True
                 self._pending = {"url": url, "fmt": fmt, "model": model, "seat": seat,
                                  "tag": tag, "waited": submit_state_get().get("wait", 0)}
+                failed = re.search(r"^VERIFICATION_FAILED\s+(\d{6}|unknown)\s*$", out, re.M)
+                if failed:
+                    code = failed.group(1)
+                    submit_state_set(stage="VERIFICATION_FAILED", resumable=True)
+                    raise ReportError(
+                        "VERIFICATION_FAILED",
+                        f"Cloudflare 验证失败（错误码 {code}）。本次尚未提交牌谱，验证窗口已保留。"
+                        "可以点「重新加载验证」重试；若普通浏览器能通过，请点「使用普通浏览器生成报告」，"
+                        "生成报告后将报告地址粘贴回来分析。")
                 raise ReportError(
                     "VERIFICATION_PENDING",
                     "浏览器已经打开，但这次验证还没完成。"
                     "请在弹出的浏览器窗口里点一下「确认您是真人」——点完会自动继续；"
-                    "没反应就点「继续等待」。")
+                    "如果窗口显示失败，请点「重新加载验证」；普通浏览器能通过时，也可以切换到普通浏览器生成报告。")
             if "NO_TOKEN" in out:
                 raise ReportError("NO_TOKEN", no_token_hint(out, self._logfile(tag)))
             if "NO_PAGE" in out:
