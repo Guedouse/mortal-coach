@@ -481,8 +481,7 @@ CHROME_CANDIDATES = [
 def bundled_chrome():
     """随包的 Chromium 目录（runtime/chromium），没有就返回空串。
 
-    严格「解压即用」的 full 版需要它：把 Chromium 的完整目录（不只是 chrome.exe，
-    *.dll、locales、resources.pak 都要）放进 `runtime/chromium/`，这里会优先用它。
+    仅为历史代码兼容保留。当前浏览器候选不使用该目录，两种发行包都不附提交浏览器。
     lite 版不带这个目录，于是退回系统安装的浏览器。
     """
     base = RUNTIME / "chromium"
@@ -512,12 +511,8 @@ CHROME_NOTE = ""
 def chrome_candidates():
     """按优先级列出**存在**的浏览器候选 [(路径, 来源), ...]，已去重。
 
-    顺序：用户指定 → 环境变量 → 系统正式版 Chrome/Edge → full 包内 Chromium → 注册表。
-
-    随包那份排在系统后面：它是 Chromium 快照，版本号与发布通道都和用户日常
-    浏览器不同，Cloudflare 对它的信任度没有保证；把它排前面会让「本来用系统
-    Chrome 跑得好好的」用户在没有改任何设置的情况下换内核。full 版的价值是
-    「没装浏览器也能用」，所以只在找不到系统浏览器时兜底。
+    顺序：用户指定 → 环境变量 → 系统正式版 Chrome/Edge → 注册表。
+    不使用旧目录中可能残留的 Chromium；没有浏览器时请用户安装。
     """
     seen, out = set(), []
 
@@ -538,7 +533,6 @@ def chrome_candidates():
     add(os.environ.get("MORTAL_COACH_CHROME") or "", "env")
     for p in CHROME_CANDIDATES:
         add(p, "system")
-    add(bundled_chrome(), "bundled")
     # 注册表里 Chrome 的 App Paths 最可靠（自定义安装目录也能找到）
     if os.name == "nt":
         try:
@@ -924,21 +918,33 @@ def port_open(port, host="127.0.0.1"):
         return s.connect_ex((host, port)) == 0
 
 
-def read_devtools_port(profile_dir):
-    """Chrome 以 --remote-debugging-port=0 启动后，实际端口写在 profile 的
-    DevToolsActivePort 第一行。用 0 让浏览器自己挑端口，就不会和用户开着的
-    调试浏览器（常见 9222）抢，也不会误连到别人的实例。"""
-    try:
-        txt = (Path(profile_dir) / "DevToolsActivePort").read_text(encoding="utf-8", errors="ignore")
-        return int((txt.splitlines() or [""])[0].strip())
-    except Exception:
-        return 0
+def allocate_debug_port():
+    """由系统分配空闲端口，再以明确的非零值启动浏览器。
+
+    不能将 0 直接传给 Chrome：该启动模式与旧版不同，已在验证流程中复现兼容问题。
+    释放端口到浏览器绑定之间存在竞争，因此还必须核对本次子进程输出的端点。
+    """
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        return probe.getsockname()[1]
+
+
+def browser_endpoint_from_line(line, port):
+    """只接受本次启动输出中、属于指定回环端口的 Browser 端点。"""
+    match = re.fullmatch(r"DevTools listening on (ws://127\.0\.0\.1:(\d+)/devtools/browser/[A-Za-z0-9-]+)",
+                         line.strip())
+    return match.group(1) if match and int(match.group(2)) == port else ""
+
+
+def browser_endpoint_matches(port, expected):
+    return bool(expected and (cdp_json(port, "/json/version") or {}).get("webSocketDebuggerUrl") == expected)
 
 
 def cdp_json(port, path, timeout=3.0):
     """读本地调试端口的 JSON 接口（/json/list、/json/version）。失败返回 None。"""
     try:
-        with urllib.request.urlopen(f"http://127.0.0.1:{port}{path}", timeout=timeout) as r:
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        with opener.open(f"http://127.0.0.1:{port}{path}", timeout=timeout) as r:
             return json.loads(r.read().decode("utf-8", "replace"))
     except Exception:
         return None
@@ -997,7 +1003,7 @@ CHROME_VER = ""
 # 「源码修好了、EXE 还是旧的」这种混合状态，所以把身份显式报出来：
 #   - EXE 构建时间取可执行文件自身的修改时间（改名/重打包必然变化）
 #   - 外置 JS 自带 SCRIPT_BUILD，两边不一致时日志与设置里直接标红
-SUBMIT_BUILD = 5          # 必须与 tools/submit_auto.mjs 的 BUILD 一致
+SUBMIT_BUILD = 6          # 必须与 tools/submit_auto.mjs 的 BUILD 一致
 # 勾了「显示浏览器」时等用户点验证的上限（秒）。MC_MANUAL_WAIT 只给排查/自测用。
 MANUAL_WAIT_SEC = int(os.environ.get("MC_MANUAL_WAIT") or 300)
 APP_BUILD = "2026-11-21"  # 源码构建号，发版时更新
@@ -1584,6 +1590,7 @@ class Api:
         self.busy = False       # 等价于 bool(self._op)，保留旧名字给已有调用方看
         self._chrome_proc = None
         self._owns_chrome = False
+        self._chrome_debug_ws = ""
         # 人工验证期间要保留的东西：脚本进程、待续任务、以及「别关浏览器」标志
         self._node_proc = None
         self._pending = {}
@@ -1855,15 +1862,15 @@ class Api:
         窗口默认挪到屏幕外（用户看不到，也不抢焦点）；设置里可以改成显示，
         方便自己处理验证码。关闭走 CDP Browser.close，profile 干净、不会弹崩溃恢复。
 
-        **只用自己启动的实例**：端口交给浏览器自己挑（--remote-debugging-port=0），
-        从 profile 的 DevToolsActivePort 读回来。不探测也不复用系统里已有的调试端口——
-        「9222 能连上」只说明有人占着那个端口，连上去等于接管别人的浏览器。
+        **只用自己启动的实例**：系统分配空闲端口，以明确的非零值传给浏览器。
+        读取本次子进程输出的 Browser 端点并与 HTTP 端点核对；端口通了并不能证明归属。
         """
         global CDP_PORT
 
         # 本次已经启动过、进程还活着：直接复用（端口就是当初那个）
         if (self._owns_chrome and self._chrome_proc is not None
-                and self._chrome_proc.poll() is None and CDP_PORT and port_open(CDP_PORT)):
+                and self._chrome_proc.poll() is None and CDP_PORT
+                and browser_endpoint_matches(CDP_PORT, self._chrome_debug_ws)):
             return True
 
         cands = chrome_candidates()
@@ -1890,9 +1897,13 @@ class Api:
         port = 0
         skipped = []
         for cand, src in cands[:3]:
+            import queue
+            events = queue.Queue()
+            expected = ""
             try:
+                requested = allocate_debug_port()
                 self._chrome_proc = subprocess.Popen(
-                    [cand, "--remote-debugging-port=0",
+                    [cand, f"--remote-debugging-port={requested}",
                          f"--user-data-dir={prof}",
                          f"--window-position={pos}", "--window-size=1000,760",
                          "--no-first-run", "--no-default-browser-check",
@@ -1906,9 +1917,24 @@ class Api:
                          "--disable-renderer-backgrounding",
                          "--disable-backgrounding-occluded-windows",
                          "--disable-features=CalculateNativeWinOcclusion,Translate,MediaRouter",
-                         "https://mjai.ekyu.moe/"], **gui_process_kwargs())
+                         "https://mjai.ekyu.moe/"], stdout=subprocess.DEVNULL,
+                         stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace",
+                         **gui_process_kwargs())
                 self._owns_chrome = True
+                self._chrome_debug_ws = ""
                 CDP_PORT = 0
+                def read_endpoint(stream, result_queue, requested_port):
+                    try:
+                        for line in stream:
+                            endpoint = browser_endpoint_from_line(line, requested_port)
+                            if endpoint:
+                                result_queue.put(endpoint)
+                    except (OSError, ValueError):
+                        pass
+                    finally:
+                        stream.close()
+                threading.Thread(target=read_endpoint,
+                                 args=(self._chrome_proc.stderr, events, requested), daemon=True).start()
             except Exception as e:
                 skipped.append("%s: cannot start (%s)" % (Path(cand).name, type(e).__name__))
                 self._chrome_proc = None
@@ -1917,13 +1943,18 @@ class Api:
             got = 0
             for _ in range(80):
                 time.sleep(0.25)
-                got = read_devtools_port(prof)
-                if got and port_open(got):
+                try:
+                    expected = events.get_nowait()
+                except queue.Empty:
+                    pass
+                if browser_endpoint_matches(requested, expected):
+                    got = requested
                     break
                 if self._chrome_proc.poll() is not None:
                     break
-            if got and port_open(got):
+            if got and browser_endpoint_matches(got, expected):
                 port = got
+                self._chrome_debug_ws = expected
                 globals()["CHROME"] = cand
                 globals()["CHROME_SOURCE"] = src
                 globals()["CHROME_NOTE"] = ("; ".join(skipped) + "; " if skipped else "") + "using " + src
@@ -1983,7 +2014,8 @@ class Api:
         self._owns_chrome = False
         try:
             if p.poll() is None:
-                cdp_browser_close(CDP_PORT)      # 先礼后兵：让它自己正常退出（只关自己的端口）
+                if browser_endpoint_matches(CDP_PORT, self._chrome_debug_ws):
+                    cdp_browser_close(CDP_PORT)  # 端点仍属于本次进程时才发关闭命令
                 try:
                     p.wait(timeout=6)
                 except subprocess.TimeoutExpired:
@@ -1997,6 +2029,7 @@ class Api:
                 pass
         finally:
             CDP_PORT = 0
+            self._chrome_debug_ws = ""
 
     def _logfile(self, tag):
         LOGS.mkdir(parents=True, exist_ok=True)

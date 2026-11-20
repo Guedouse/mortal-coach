@@ -56,12 +56,12 @@ INCLUDE_DIRS = ["assets", "app", "scripts", "tools", "tests", "docs", "licenses"
 
 # full 版额外带的运行环境。lite 版**明确不带**（验包会反向检查这两个目录不存在），
 # 少了两边都不会"悄悄带一半"。
-FULL_DIRS = ["runtime/chromium", "runtime/webview2"]
+FULL_DIRS = ["runtime/webview2"]
 
 # 两种发行资产：文件名只差最后一段，验包也必须按同一口径检查
 FLAVORS = {
     "lite": "不带浏览器与 WebView2，用系统那份；包小、启动快",
-    "full": "连 Chromium 与 WebView2 固定版一起带，没有系统浏览器也能跑",
+    "full": "自带界面所需 WebView2；提交牌谱使用用户安装的日常浏览器",
 }
 
 # 任何位置都不进包
@@ -107,12 +107,12 @@ REQUIRED_LICENSES = [
 
 # 只有 full 版随包分发的东西，许可原文单列：lite 版里没有它们，也就不该要求
 FULL_LICENSES = [
-    "chromium-BSD-3-Clause.txt",
     "webview2-runtime-Microsoft.txt",
 ]
 
 # 禁入项（最终 ZIP 里出现任意一条就失败）
 FORBIDDEN_PATTERNS = [
+    (r"^runtime/chromium/", "已停止分发的提交浏览器"),
     (r"^library/report/", "个人牌谱报告"),
     (r"^library/img_layout/", "分析图片"),
     (r"^library/logs/", "提交日志"),
@@ -174,7 +174,8 @@ def iter_release_files(flavor="lite"):
         for dirpath, dirnames, filenames in os.walk(root):
             rel_dir = Path(dirpath).relative_to(BASE).as_posix()
             dirnames[:] = [x for x in dirnames
-                           if not in_skip_dir(f"{rel_dir}/{x}") and x != "__pycache__"]
+                           if not in_skip_dir(f"{rel_dir}/{x}") and x != "__pycache__"
+                           and f"{rel_dir}/{x}" != "runtime/chromium"]
             if flavor != "full":
                 dirnames[:] = [x for x in dirnames
                                if f"{rel_dir}/{x}" not in FULL_DIRS]
@@ -277,9 +278,7 @@ def check_required(out_dir, flavor="lite"):
     if not (BASE / "runtime" / "node" / "node.exe").exists():
         missing.append("runtime/node/node.exe")
     if flavor == "full":
-        # full 版的卖点就是「没有系统浏览器也能跑」，这两样缺一样就不算 full
-        if find_chrome_exe() is None:
-            missing.append("runtime/chromium/chrome.exe（full 版随包的浏览器）")
+        # full 只附界面运行时；日常浏览器由用户安装。
         wv = find_webview2_dir()
         if wv is None:
             missing.append("runtime/webview2/**/msedgewebview2.exe（full 版随包的 WebView2 固定版）")
@@ -311,14 +310,9 @@ def runtime_versions(flavor="lite"):
         if wv is not None:
             bundled = wv.name if wv.name[:1].isdigit() else "flat"
         out["webview2"] = ("bundled " + bundled) if bundled else "缺失（full 版必须随包）"
-        ch = find_chrome_exe()
-        out["chromium"] = (("bundled " + (file_version(ch) or "unknown")) if ch
-                           else "缺失（full 版必须随包）")
     else:
-        # lite 版**不带**这两样，只记「用系统那份」。别照开发机目录里现成的那份写，
-        # 否则 lite 包的清单会声称 bundled，与实际内容不符。
         out["webview2"] = "system（未随包分发）"
-        out["chromium"] = "system（未随包分发）"
+    out["chromium"] = "system browser（所有发行版本均不附浏览器）"
     fnt = BASE / "assets" / "fonts" / "NotoSansSC-Regular.otf"
     out["font"] = f"NotoSansSC-Regular {fnt.stat().st_size} bytes" if fnt.exists() else "缺失"
     # 实际钉住的运行依赖也记进来：出了「某台机器上就是不一样」的问题时，
@@ -375,11 +369,9 @@ def build(out_dir, make_zip=True, ver="", flavor="lite"):
             "zip": zip_name,
             "note": "library/ 为空库：只含 coach/index.json=[] 与 bad_moves.json=[]；"
                     "mortal-coach.json 由 build_release.EMPTY_CONFIG 生成；"
-                    + ("full 版含 runtime/chromium 与 runtime/webview2（固定版），"
-                       "首次启动优先用随包那份，--selftest 的 *_source 应为 bundled"
+                    + ("full 版仅附 runtime/webview2 界面运行时，提交使用日常浏览器"
                        if flavor == "full" else
-                       "lite 版不含 runtime/chromium 与 runtime/webview2，"
-                       "浏览器与 WebView2 用系统已装的"),
+                       "lite 版使用系统 WebView2，提交使用日常浏览器"),
         }
         z.writestr("release-manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2))
 
@@ -442,19 +434,6 @@ def verify(zip_path, flavor="lite"):
         # 两种资产的差别就在这里：lite 不许夹带，full 必须真有、而且解压得完整。
         # 只看"目录存在"是不够的 —— 断点续传失败、只解了一层，都会留下一个空壳目录。
         if flavor == "full":
-            CHROME_MUST = ["runtime/chromium/chrome.exe",
-                           "runtime/chromium/chrome.dll",
-                           "runtime/chromium/resources.pak",
-                           "runtime/chromium/icudtl.dat"]
-            for m in CHROME_MUST:
-                if m not in names:
-                    problems.append(f"full 版缺少随包浏览器文件 {m}")
-            ch_files = [n for n in names if n.startswith("runtime/chromium/")]
-            locales = [n for n in ch_files if n.startswith("runtime/chromium/locales/")]
-            if len(ch_files) < 80:
-                problems.append(f"随包浏览器只有 {len(ch_files)} 个文件，像是没解压完整")
-            if not locales:
-                problems.append("随包浏览器缺 locales/（Chromium 少了它会启动失败）")
             wv = [n for n in names if re.match(r"^runtime/webview2/([^/]+/)?msedgewebview2\.exe$", n)]
             wv_all = [n for n in names if n.startswith("runtime/webview2/")]
             for m in ("msedge.dll", "resources.pak", "icudtl.dat"):
@@ -465,8 +444,7 @@ def verify(zip_path, flavor="lite"):
             if len(wv_all) < 400:
                 problems.append(f"随包 WebView2 只有 {len(wv_all)} 个文件（官方固定版是 548 个），"
                                 "像是没解压完整")
-            checked.append(f"随包浏览器 {len(ch_files)} 项、随包 WebView2 {len(wv_all)} 项"
-                           "（含 chrome.exe / msedgewebview2.exe / msedge.dll）")
+            checked.append(f"随包 WebView2 {len(wv_all)} 项；不包含提交浏览器")
         else:
             stray = [n for n in names
                      if n.startswith("runtime/chromium/") or n.startswith("runtime/webview2/")]

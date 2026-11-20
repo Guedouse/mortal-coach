@@ -1137,8 +1137,8 @@ class TestChromeSelection(unittest.TestCase):
                  unittest.mock.patch.object(M, "bundled_chrome", return_value=bun):
                 self._env_clean()
                 rows = M.chrome_candidates()
-                self.assertEqual([src for _, src in rows][:3],
-                                 ["settings", "system", "bundled"])
+                self.assertEqual([src for _, src in rows][:2], ["settings", "system"])
+                self.assertNotIn("bundled", [src for _, src in rows])
                 self.assertEqual(M.find_chrome(), user)
                 self.assertEqual(M.CHROME_SOURCE, "settings")
 
@@ -1153,7 +1153,7 @@ class TestChromeSelection(unittest.TestCase):
                 self.assertEqual(M.find_chrome(), sysc)
                 self.assertEqual(M.CHROME_SOURCE, "system")
 
-    def test_bundled_is_last_resort(self):
+    def test_no_bundled_browser_fallback(self):
         with tempfile.TemporaryDirectory() as d:
             bun = self._touch(d, "bun.exe")
             with unittest.mock.patch.object(M, "CONFIG", {}), \
@@ -1162,8 +1162,8 @@ class TestChromeSelection(unittest.TestCase):
                  unittest.mock.patch.object(M, "_chrome_from_registry", create=True,
                                             return_value=""):
                 self._env_clean()
-                self.assertEqual(M.find_chrome(), bun)
-                self.assertEqual(M.CHROME_SOURCE, "bundled")
+                rows = M.chrome_candidates()
+                self.assertNotIn(bun, [p for p, _ in rows])
 
     def test_dedup_same_path(self):
         with tempfile.TemporaryDirectory() as d:

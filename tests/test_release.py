@@ -54,9 +54,9 @@ class TestFlavorFiles(unittest.TestCase):
         self.assertFalse([a for a in arcs if a.startswith("runtime/chromium/")])
         self.assertFalse([a for a in arcs if a.startswith("runtime/webview2/")])
 
-    def test_full_includes_bundled_engines(self):
+    def test_full_includes_only_interface_runtime(self):
         arcs = self.arcs("full")
-        self.assertIn("runtime/chromium/chrome.exe", arcs)
+        self.assertFalse([a for a in arcs if a.startswith("runtime/chromium/")])
         self.assertIn("runtime/webview2/152.0.4191.53/msedgewebview2.exe", arcs)
         self.assertIn("runtime/webview2/152.0.4191.53/msedge.dll", arcs)
         self.assertIn("runtime/python/python.exe", arcs)
@@ -77,7 +77,7 @@ class TestFlavorFiles(unittest.TestCase):
         self.assertIn("system", rv["chromium"])
         rv_full = BR.runtime_versions("full")
         self.assertIn("bundled", rv_full["webview2"])
-        self.assertIn("bundled", rv_full["chromium"])
+        self.assertIn("system", rv_full["chromium"])
 
 
 if __name__ == "__main__":

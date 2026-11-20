@@ -14,7 +14,7 @@
 //   NO_PAGE / NO_TOKEN / NO_FORM / NO_REPORT_URL / REPORT_TIMEOUT / REPORT_URL
 //   EXC     | ...            Runtime.evaluate 抛异常
 // 退出码：0 成功或 dry 完成 / 1 无页面 / 2 无 token / 3 填表异常 / 4 未拿到报告页
-const BUILD = 5;   // 与 app/main.py 的 SUBMIT_BUILD 必须一致；Python 会核对
+const BUILD = 6;   // 与 app/main.py 的 SUBMIT_BUILD 必须一致；Python 会核对
 const PORT = process.env.CDP_PORT || 9222;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 console.log('SCRIPT_BUILD', BUILD);

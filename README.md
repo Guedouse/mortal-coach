@@ -40,21 +40,22 @@
 
 ### 方式一：发行包（推荐）
 
-两种资产，只差「随不随包带浏览器内核」，功能完全一样。**默认下 lite**；full 是可选的
-「什么系统组件都不用装」版本，不是必需项，也不是发布验收门槛：
+两种资产的区别仅为是否附带界面运行时 WebView2。**默认下载 lite**；两种版本分析新牌谱都需要用户安装 Chrome 或 Edge。
 
-| 文件 | 下载 / 解压 | 适合谁 |
-|---|---|---|
-| `mortal-coach-<版本>-windows-x64-lite.zip` | 约 76 MB / 163 MB | **默认选这个**：系统里已装 Chrome 或 Edge（绝大多数 Windows 10/11，只有 Edge 也行） |
-| `mortal-coach-<版本>-windows-x64-full.zip` | 约 630 MB / 1.4 GB | 可选：干净系统、离线机器、给别人装机 —— 不用先装浏览器或 WebView2（**已有报告的复盘可完全离线；分析新牌谱仍要联网**） |
+| 文件 | 适合谁 |
+|---|---|
+| `mortal-coach-<版本>-windows-x64-lite.zip` | 系统已有 Chrome／Edge 和 WebView2，优先选择 |
+| `mortal-coach-<版本>-windows-x64-full.zip` | 需要随包 WebView2 界面运行时；提交浏览器仍由用户安装 |
+
+包的实际大小以 Releases 文件和清单为准。两种版本均不附 Chromium，也不会自动下载安装浏览器。
 
 1. 解压到**有写权限**的目录（页面上单独列出的 `SHA256SUMS.txt` 用来校验下载是否完整）。
 2. 双击 `mortal-coach.exe`（不要只拷 EXE 出来，`assets/`、`scripts/`、`tools/`、`runtime/` 要一起）。
 3. 首次启动会在程序目录下建空的 `library/`，之后分析记录都存在那里。
 
-**两个包差在哪**：lite 用系统已装的 Chrome / Edge 与系统 WebView2；full 把
-Chromium 157.0.8086.0（官方快照）与 WebView2 Fixed Version 152.0.4191.53 一起带进来，启动时**优先用包内那份**
-（`mortal-coach.exe --selftest` 里 `chrome_source` / `webview2_source` 会显示 `bundled`）。
+**两个包差在哪**：lite 使用系统 WebView2；full 附带 WebView2 Fixed Version 152.0.4191.53。
+新牌谱默认使用系统已装的 Chrome／Edge，保留自动填写、提交、取回报告和中文解读。浏览器使用本应用独立资料目录，需要真人验证时请在窗口内完成，不需要安装扩展或复制报告地址。
+WebView2 仅用于应用界面，不承担向 Mortal 提交牌谱。
 full 不往系统里装任何东西、不写注册表、不要管理员权限。**卸载**：关掉应用、备份要留的牌谱，
 删掉程序目录即可；如果你把牌谱库改到了别的目录，或换过配置，`%LOCALAPPDATA%\mortal-coach\`
 下还会留实例缓存（配置、WebView2 数据），这两处需要自己按实际路径清理。Windows 10 上首次
@@ -65,20 +66,17 @@ full 不往系统里装任何东西、不写注册表、不要管理员权限。
 
 - Windows 10 / 11 **64 位**。macOS、Linux、32 位 Windows、ARM64 不能直接运行这个包。
 - 已带 Python 3.13 与 Node 22，**不需要另外安装**。
-- lite 版需要系统里有 **Chrome 或 Edge**（只装了 Edge 也可以，会自动找到它）—— 提交新牌谱
+- 两种版本分析新牌谱都需要系统里有 **Chrome 或 Edge**（只装了 Edge 也可以，会自动找到它）—— 提交新牌谱
   要过一个真人验证，必须用真浏览器。找不到时分析请求会直接告诉你原因，并指到
-  「设置 → 提交浏览器」手动指定 exe 或安装浏览器。**full 版自带 Chromium，这一条对 full 不适用。**
+  「设置 → 提交浏览器」手动指定 exe 或安装浏览器。full 版同样需要用户安装浏览器。
 - 界面渲染用 WebView2。lite 版用系统那份：Windows 11 自带，Windows 10 只要装过
   Microsoft Edge 一般也有；**应用启动时会自己检测**，认不到就弹一个说明框并给出微软官方
   下载地址（约 2 MB，装完重启应用即可），退出码 2，不会让你对着一句异常发呆。
   **full 版自带固定版运行时，不依赖系统。**
   `mortal-coach.exe --selftest` 会打印 `chrome_source` / `webview2_source`
-  （`system` 或 `bundled`）/ `webview2_version` 三项自查。
+  （浏览器为系统路径，WebView2 为 `system` 或 `bundled`）/ `webview2_version` 自查。
 
-> full 版为什么这么大：WebView2 官方固定版 cab 是 **371 MB**（解压 800 MB，其中
-> `msedge.dll` 一个文件就 328 MB），Chromium 快照解压后 467 MB。
-> 两者都不能裁 —— 少一个 `locales/*.pak` 或 `resources.pak` 就直接起不来。
-> 所以「解压即用」的代价就是单包 630 MB 上下；日常用 lite 更划算。
+> full 比 lite 大，主要因为附带完整 WebView2 界面运行时，不能随意裁剪其文件。
 
 **联网边界**：打开已有报告、重新生成中文解释，全程离线可用；**输入新牌谱链接必须联网**
 （评分在 `mjai.ekyu.moe` 上做，本包不含 Mortal 推理引擎与模型权重）。
@@ -139,8 +137,7 @@ runtime\python\python.exe build_release.py --out D:\dist                    :: �
 :: 想用人类可读的版本号（默认是 日期-提交）：文件名、manifest、校验文件都由它生成
 runtime\python\python.exe build_release.py --out D:\dist --version v1.0
 
-:: full 版（自带浏览器与 WebView2）：先把两样东西放好，再加 --flavor full
-::   runtime\chromium\chrome.exe          ← Chromium 官方快照 chrome-win.zip 解压（去掉测试程序）
+:: full 版仅附 WebView2 界面运行时，不附提交浏览器
 ::   runtime\webview2\<版本>\msedgewebview2.exe ← 官方 Fixed Version cab 解压（expand 即可）
 runtime\python\python.exe build_release.py --out D:\dist --flavor full --version v1.0
 ```
@@ -155,7 +152,7 @@ runtime\python\python.exe build_release.py --out D:\dist --flavor full --version
   `release-manifest-<flavor>.json`（按 flavor 各存一份，先打 lite 再打 full 也不会互相覆盖）
 
 `--flavor` 也决定验包口径：lite **不许**夹带 `runtime/chromium`、`runtime/webview2`；
-full **必须**有 `chrome.exe`、`msedgewebview2.exe`、`msedge.dll`，并且文件数量够（断点续传
+两种版本都**不许**带提交用 Chromium；full **必须**有 `msedgewebview2.exe`、`msedge.dll`，并且文件数量够（断点续传
 只解了一半的目录会被当场判失败，不会打出个空壳包）。
 
 > `runtime/python`、`runtime/node` 需要自己准备（官方 Python 3.13 embeddable + Pillow、

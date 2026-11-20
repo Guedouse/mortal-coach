@@ -23,7 +23,6 @@
 | 立直麻将牌图 | FluffyStuff/riichi-mahjong-tiles | Public Domain / CC0 1.0 | `assets/kd/media/` | `licenses/riichi-mahjong-tiles-CC0.txt` |
 | Noto Sans SC（中文字体） | Regular，SubsetOTF | SIL Open Font License 1.1 | `assets/fonts/NotoSansSC-Regular.otf` | `licenses/noto-sans-sc-OFL.txt` |
 | Microsoft Edge WebView2 Runtime（系统 Evergreen 版） | **lite 版不随包分发**，用系统已安装的那份 | Microsoft 软件许可条款（用户与 Microsoft 之间成立） | — | 不分发则不产生再分发义务；见第 6.1 节 |
-| Chromium（官方 Win_x64 快照） | 157.0.8086.0（snapshot rev 1710741） | BSD 3-Clause 及其捆绑的第三方组件许可 | `runtime/chromium/`（**仅 full 版**） | `licenses/chromium-BSD-3-Clause.txt`（**许可原文**） |
 | Microsoft Edge WebView2 Runtime（Fixed Version） | 152.0.4191.53 x64 | Microsoft 软件许可条款（**专有软件**，允许随应用再分发，见 6.1） | `runtime/webview2/152.0.4191.53/`（**仅 full 版**） | `licenses/webview2-runtime-Microsoft.txt`（**来源声明 + 第 8 节用户通知，不是条款正文**；正文见 6.1 的官方链接） |
 
 `mortal-coach.exe` 内冻结的依赖除 pywebview / pythonnet / PyInstaller bootloader 外，
@@ -119,7 +118,7 @@ commit 与行数 → 重新出包。
 ## 6.1 界面内核 WebView2 与浏览器内核的分发方式
 
 本项目的**默认发行包是 lite 版**（使用用户系统已有的浏览器与 WebView2）；full 版是**可选**的
-便携变体，把两份内核装进包里。无论哪个版本，应用都不会往系统里安装或注册任何组件。
+便携变体，只附带 WebView2 界面运行时，不附提交浏览器。无论哪个版本，应用都不会往系统里安装或注册任何组件。
 
 **lite 版**：发行包**不携带** WebView2 运行时，运行时由用户的 Windows 提供（Windows 11 内置，
 Windows 10 随 Microsoft Edge 一起安装）。程序启动时只做两件事：
@@ -132,22 +131,14 @@ Windows 10 随 Microsoft Edge 一起安装）。程序启动时只做两件事�
 因为不分发该运行时，lite 版不承担其再分发义务；用户与 Microsoft 之间按其 Windows / Edge 条款成立。
 `--selftest` 的 `webview2_source` 字段会显示 `system`。
 
-**full 版**：随包分发两份内核，都不安装到系统：
+**full 版**：仅随包分发 WebView2 界面运行时，不安装到系统：
 
 - `runtime/webview2/152.0.4191.53/` —— 官方 **Fixed Version** 运行时，从微软官方 CDN 下载的
   `Microsoft.WebView2.FixedVersionRuntime.152.0.4191.53.x64.cab`（371,824,512 字节，
   SHA-256 `f8f200b57d6a7a71d380f777f5c0ea0f71f520048add21e15737121de9ba4f68`）用
   `expand` 原样解开，548 个文件，未删改任何文件。程序启动时把
   `WEBVIEW2_BROWSER_EXECUTABLE_FOLDER` 指向该目录，**不写注册表、不需要管理员权限**。
-- `runtime/chromium/` —— Chromium 官方 **Win_x64 快照** 157.0.8086.0（snapshot rev 1710741，
-  `https://storage.googleapis.com/chromium-browser-snapshots/Win_x64/1710741/chrome-win.zip`）
-  解压，用于「提交牌谱」时过 Turnstile。`--selftest` 的 `chrome_source` 显示 `bundled`。
-  只删了一个与运行无关的文件 `interactive_ui_tests.exe`（Chromium 自带的 UI 自动化测试程序，
-  349 MB），其余 257 个文件原样保留。没有随包任何 Google 品牌版本的 Chrome。
-
-**许可证性质**：Chromium 是 BSD 3-Clause 开源软件，`licenses/chromium-BSD-3-Clause.txt` 是
-其 `LICENSE` 原文（取自 `chromium/src` 仓库）；它捆绑的第三方组件清单可在随包浏览器里打开
-`chrome://credits` 查看。
+当前两种发行版本均不分发提交用 Chromium。Chrome／Edge 由用户自行安装，并适用其各自许可。仓库内可能保留历史 Chromium 许可文件，不能据此认定当前发行包附带该浏览器。
 
 WebView2 运行时是**微软的专有软件**，不在本项目 MIT 许可范围内。这里要分清两件事：
 
