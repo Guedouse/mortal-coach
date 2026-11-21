@@ -108,6 +108,11 @@ class TestLeakPatterns(unittest.TestCase):
 
 
 class TestBuildSource(unittest.TestCase):
+    def test_runtime_pip_is_not_a_release_dependency(self):
+        self.assertTrue(BR.in_skip_dir('runtime/python/Lib/site-packages/pip'))
+        self.assertTrue(BR.in_skip_dir('runtime/python/Lib/site-packages/pip-26.1.2.dist-info'))
+        self.assertFalse(BR.in_skip_dir('runtime/python/Lib/site-packages/PIL'))
+
     def test_failed_git_command_does_not_become_head_commit(self):
         with patch.object(BR, 'sh', return_value='HEAD'):
             self.assertEqual(BR.source_info(), {'commit': None, 'dirty': None})

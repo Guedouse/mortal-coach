@@ -176,6 +176,9 @@ def version(explicit=""):
 
 
 def in_skip_dir(rel):
+    # 包内解释器只运行分析脚本，不需要开发机后来安装的包管理器。
+    if re.match(r"^runtime/python/Lib/site-packages/pip(?:/|-[^/]+\.dist-info(?:/|$)|$)", rel, re.I):
+        return True
     return any(rel == d or rel.startswith(d + "/") for d in SKIP_DIRS)
 
 
