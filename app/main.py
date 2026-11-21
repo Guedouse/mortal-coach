@@ -1003,7 +1003,7 @@ CHROME_VER = ""
 # 「源码修好了、EXE 还是旧的」这种混合状态，所以把身份显式报出来：
 #   - EXE 构建时间取可执行文件自身的修改时间（改名/重打包必然变化）
 #   - 外置 JS 自带 SCRIPT_BUILD，两边不一致时日志与设置里直接标红
-SUBMIT_BUILD = 6          # 必须与 tools/submit_auto.mjs 的 BUILD 一致
+SUBMIT_BUILD = 7          # 必须与 tools/submit_auto.mjs 的 BUILD 一致
 # 勾了「显示浏览器」时等用户点验证的上限（秒）。MC_MANUAL_WAIT 只给排查/自测用。
 MANUAL_WAIT_SEC = int(os.environ.get("MC_MANUAL_WAIT") or 300)
 APP_BUILD = "2026-11-21"  # 源码构建号，发版时更新
@@ -1084,6 +1084,7 @@ def submit_stage_of(line):
     """把脚本的一行输出翻译成（阶段, 是否要立刻告诉用户）。"""
     t = line.strip()
     for key, stage in (("NEED_MANUAL", "AWAITING_VERIFICATION"),
+                       ("VERIFICATION_CHECKING", "CHECKING_VERIFICATION"),
                        ("VERIFICATION_REQUIRED", "AWAITING_VERIFICATION"),
                        ("VERIFICATION_TIMEOUT", "AWAITING_VERIFICATION"),
                        ("VERIFICATION_FAILED", "VERIFICATION_FAILED"),
@@ -2451,8 +2452,8 @@ class Api:
                         "生成报告后将报告地址粘贴回来分析。")
                 raise ReportError(
                     "VERIFICATION_PENDING",
-                    "浏览器已经打开，但这次验证还没完成。"
-                    "请在弹出的浏览器窗口里点一下「确认您是真人」——点完会自动继续；"
+                    "这次验证还没完成。请点「显示验证窗口」，在浏览器里手动确认。"
+                    "本次等待已暂停，完成验证后点「继续等待」提交牌谱；"
                     "如果窗口显示失败，请点「重新加载验证」；普通浏览器能通过时，也可以切换到普通浏览器生成报告。")
             if "NO_TOKEN" in out:
                 raise ReportError("NO_TOKEN", no_token_hint(out, self._logfile(tag)))

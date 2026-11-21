@@ -43,6 +43,8 @@ REQUIRED_FILES = [
     "LICENSE",
     "THIRD_PARTY_NOTICES.md",
     "使用说明.md",
+    "CHANGELOG.md",
+    "PRIVACY.md",
     "rebuild.bat",
     "一键重建解读.bat",
     "requirements.txt",
@@ -61,7 +63,7 @@ FULL_DIRS = ["runtime/webview2"]
 # 两种发行资产：文件名只差最后一段，验包也必须按同一口径检查
 FLAVORS = {
     "lite": "不带浏览器与 WebView2，用系统那份；包小、启动快",
-    "full": "自带界面所需 WebView2；提交牌谱使用用户安装的日常浏览器",
+    "full": "自带界面所需 WebView2；提交牌谱使用用户安装的 Chrome/Edge 和独立应用资料目录",
 }
 
 # 任何位置都不进包
@@ -112,6 +114,7 @@ FULL_LICENSES = [
 
 # 禁入项（最终 ZIP 里出现任意一条就失败）
 FORBIDDEN_PATTERNS = [
+    (r"(^|/)(Cookies(?:-journal)?|History(?:-journal)?|Login Data|Web Data|Local State|DevToolsActivePort)$", "浏览器个人数据"),
     (r"^runtime/chromium/", "已停止分发的提交浏览器"),
     (r"^library/report/", "个人牌谱报告"),
     (r"^library/img_layout/", "分析图片"),
@@ -144,9 +147,17 @@ def sh(*cmd):
     try:
         r = subprocess.run(cmd, cwd=str(BASE), capture_output=True, text=True,
                            encoding="utf-8", errors="replace", timeout=20)
-        return (r.stdout or "").strip()
+        return (r.stdout or "").strip() if r.returncode == 0 else ""
     except Exception:
         return ""
+
+
+def source_info():
+    """无 Git 提交时明确标为 unknown，不把失败命令回显的 HEAD 写成提交号。"""
+    commit = sh("git", "rev-parse", "--verify", "HEAD")
+    if not re.fullmatch(r"[0-9a-f]{40}", commit):
+        return {"commit": None, "dirty": None}
+    return {"commit": commit, "dirty": bool(sh("git", "status", "--porcelain"))}
 
 
 def version(explicit=""):
@@ -159,7 +170,8 @@ def version(explicit=""):
     if str(explicit or "").strip():
         return str(explicit).strip()
     day = time.strftime("%Y%m%d")
-    rev = sh("git", "rev-parse", "--short", "HEAD")
+    commit = source_info()["commit"]
+    rev = commit[:7] if commit else ""
     return f"{day}-{rev}" if rev else day
 
 
@@ -371,8 +383,7 @@ def build(out_dir, make_zip=True, ver="", flavor="lite"):
             "name": APP_NAME,
             "version": ver,
             "flavor": flavor,
-            "commit": sh("git", "rev-parse", "HEAD"),
-            "dirty": bool(sh("git", "status", "--porcelain")),
+            **source_info(),
             "built_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
             "platform": "windows-x64",
             "runtimes": runtime_versions(flavor),
@@ -380,9 +391,9 @@ def build(out_dir, make_zip=True, ver="", flavor="lite"):
             "zip": zip_name,
             "note": "library/ 为空库：只含 coach/index.json=[] 与 bad_moves.json=[]；"
                     "mortal-coach.json 由 build_release.EMPTY_CONFIG 生成；"
-                    + ("full 版仅附 runtime/webview2 界面运行时，提交使用日常浏览器"
+                    + ("full 版仅附 runtime/webview2 界面运行时，提交使用系统浏览器的独立应用资料目录"
                        if flavor == "full" else
-                       "lite 版使用系统 WebView2，提交使用日常浏览器"),
+                       "lite 版使用系统 WebView2，提交使用系统浏览器的独立应用资料目录"),
         }
         z.writestr("release-manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2))
 

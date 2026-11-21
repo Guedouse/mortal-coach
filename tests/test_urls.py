@@ -120,8 +120,8 @@ class TestTags(unittest.TestCase):
     def test_schemeless_url_gets_https(self):
         """从地址栏 / 聊天里复制常丢掉协议头，要能自动补 https。"""
         self.assertEqual(
-            M.normalize_pasted_input("game.maj-soul.com/1/?paipu=261118-abc_a116815935"),
-            "https://game.maj-soul.com/1/?paipu=261118-abc_a116815935")
+            M.normalize_pasted_input("game.maj-soul.com/1/?paipu=261118-abc_a000000000"),
+            "https://game.maj-soul.com/1/?paipu=261118-abc_a000000000")
 
     def test_log_id_not_turned_into_url(self):
         """一番街 / 姬麻将的对局 ID 不能被当成网址补协议头。"""

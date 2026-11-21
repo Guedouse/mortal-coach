@@ -14,7 +14,7 @@
 //   NO_PAGE / NO_TOKEN / NO_FORM / NO_REPORT_URL / REPORT_TIMEOUT / REPORT_URL
 //   EXC     | ...            Runtime.evaluate 抛异常
 // 退出码：0 成功或 dry 完成 / 1 无页面 / 2 无 token / 3 填表异常 / 4 未拿到报告页
-const BUILD = 6;   // 与 app/main.py 的 SUBMIT_BUILD 必须一致；Python 会核对
+const BUILD = 7;   // 与 app/main.py 的 SUBMIT_BUILD 必须一致；Python 会核对
 const PORT = process.env.CDP_PORT || 9222;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 console.log('SCRIPT_BUILD', BUILD);
@@ -277,13 +277,14 @@ async function waitToken() {
   if (isToken(existing) && !usedTokens.has(existing)) { usedTokens.add(existing); return existing; }
   if (SHOW) {
     console.log('WINDOW_SHOWN 0', await showWindow());
+    console.log('WIDGET_IN_VIEW', JSON.stringify(await bringWidgetIntoView()));
+    console.log('NEED_MANUAL', '请在浏览器中完成人机验证，完成后会自动继续');
+    console.log('VERIFICATION_REQUIRED manual');
   } else {
-    // Even when background analysis is selected, manual verification must be visible.
-    console.log('WINDOW_SHOWN 0', await showWindow());
+    // Respect the visibility preference: slow automatic verification is not proof
+    // that a human is required. Offer a button instead of forcing the window open.
+    console.log('VERIFICATION_CHECKING background');
   }
-  console.log('WIDGET_IN_VIEW', JSON.stringify(await bringWidgetIntoView()));
-  console.log('NEED_MANUAL', '请在浏览器中完成人机验证；若显示验证失败，可返回应用重新加载验证，或改用普通浏览器');
-  console.log('VERIFICATION_REQUIRED manual');
   waitingForVerification = true;
   const t0 = Date.now();
   let nextLog = 0;
@@ -317,6 +318,11 @@ async function waitToken() {
       console.log('VERIFICATION_FAILED', failure);
       waitingForVerification = false;
       return '';
+    }
+    if (!SHOW && i === 15) {
+      console.log('WIDGET_IN_VIEW', JSON.stringify(await bringWidgetIntoView()));
+      console.log('NEED_MANUAL', '验证尚未自动完成，可点「显示验证窗口」查看并手动确认；窗口不会自动弹出');
+      console.log('VERIFICATION_REQUIRED hidden');
     }
     const sec = Math.round((Date.now() - t0) / 1000);
     if (sec >= nextLog) {

@@ -12,6 +12,7 @@ import importlib.util
 import shutil
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -83,7 +84,7 @@ class TestFlavorFiles(unittest.TestCase):
 class TestLeakPatterns(unittest.TestCase):
     """发行包里不许出现作者本机路径，但系统路径（Program Files / Windows）是正常的。
 
-    中文用户的库目录常常长成「盘符 + 中文」，旧的 `maa|Users\admin` 规则完全拦不住，
+    中文用户的库目录常常长成「盘符 + 中文」，旧的开发目录与用户目录规则完全拦不住，
     所以这里把两类都钉住：个人目录 + 非 ASCII 目录名。
     """
 
@@ -93,7 +94,7 @@ class TestLeakPatterns(unittest.TestCase):
 
     def test_personal_paths_flagged(self):
         bs = chr(92)
-        for p in (f"D:{bs}maa", f"C:/Users/admin", f"C:{bs}Users{bs}Somebody{bs}Desktop",
+        for p in (f"D:{bs}maa", f"C:/Users/" + "SampleUser", f"C:{bs}Users{bs}Somebody{bs}Desktop",
                   f"D:{bs}麻将复盘{bs}牌谱库"):
             self.assertTrue(self.hits(p), p)
 
@@ -104,6 +105,17 @@ class TestLeakPatterns(unittest.TestCase):
                   "https://…、根相对 /report/xxx.json",
                   "D:/mahjong-lib"):
             self.assertEqual(self.hits(p), [], p)
+
+
+class TestBuildSource(unittest.TestCase):
+    def test_failed_git_command_does_not_become_head_commit(self):
+        with patch.object(BR, 'sh', return_value='HEAD'):
+            self.assertEqual(BR.source_info(), {'commit': None, 'dirty': None})
+
+    def test_clean_git_source_revision_is_recorded(self):
+        commit = '0123456789abcdef' * 2 + '01234567'
+        with patch.object(BR, 'sh', side_effect=[commit, '']):
+            self.assertEqual(BR.source_info(), {'commit': commit, 'dirty': False})
 
 
 if __name__ == "__main__":

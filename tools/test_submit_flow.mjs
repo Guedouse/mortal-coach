@@ -12,7 +12,7 @@ const HOME = 'https://mjai.ekyu.moe/';
 async function scenario(mode, cfg = {}) {
   const calls = [], logs = [], input = new EventEmitter();
   input.setEncoding = () => {};
-  let nav = 0, sentReload = false;
+  let nav = 0, sentReload = false, tokenReads = 0;
   let finish;
   const finished = new Promise(resolve => { finish = resolve; });
   const exitError = new Error('exit');
@@ -27,7 +27,9 @@ async function scenario(mode, cfg = {}) {
       if (m.method === 'Runtime.evaluate') {
         const e = m.params.expression;
         if (e.includes('for (const el of els)')) {
-          value = mode === 'verified' || (mode === 'reload' && nav) ? 'test-only-response'.repeat(5) : '';
+          tokenReads++;
+          value = mode === 'verified' || (mode === 'reload' && nav)
+            || (mode === 'delayed-token' && tokenReads > 3) ? 'test-only-response'.repeat(5) : '';
         } else if (e.includes('failure: window.__mcVerification')) {
           value = JSON.stringify({ url: mode === 'progress' ? HOME + 'progress?task=x' : HOME,
             form: mode !== 'progress', ready: 'complete',
@@ -89,4 +91,22 @@ assert.equal(timeout.code, 2);
 assert(timeout.logs.some(l => l.startsWith('VERIFICATION_TIMEOUT')));
 assert(!timeout.logs.some(l => l.startsWith('VERIFICATION_FAILED')));
 assert(!timeout.calls.some(c => c.method === 'Page.navigate'), 'no automatic refresh on timeout');
-console.log('submit flow: 5 CDP scenarios passed');
+const hiddenAutomatic = await scenario('delayed-token', { show: false });
+assert.equal(hiddenAutomatic.code, 0);
+assert(hiddenAutomatic.logs.includes('VERIFICATION_CHECKING background'));
+assert(!hiddenAutomatic.calls.some(c => c.method.startsWith('Browser.setWindow') || c.method === 'Page.bringToFront'),
+  'unchecked setting never forces the browser to foreground');
+assert(!hiddenAutomatic.logs.some(l => l.startsWith('NEED_MANUAL')), 'give automatic verification time first');
+const hiddenWaiting = await scenario('waiting', { show: false });
+assert.equal(hiddenWaiting.code, 2);
+assert(hiddenWaiting.logs.includes('VERIFICATION_REQUIRED hidden'));
+assert(!hiddenWaiting.calls.some(c => c.method.startsWith('Browser.setWindow') || c.method === 'Page.bringToFront'),
+  'manual prompt and timeout also respect unchecked setting');
+const visibleAutomatic = await scenario('delayed-token', { show: true });
+assert.equal(visibleAutomatic.code, 0);
+assert(visibleAutomatic.calls.some(c => c.method === 'Page.bringToFront'), 'checked setting shows the browser');
+const hiddenFailed = await scenario('failed', { show: false });
+assert.equal(hiddenFailed.code, 2);
+assert(hiddenFailed.logs.includes('VERIFICATION_FAILED 600010'));
+assert(!hiddenFailed.calls.some(c => c.method === 'Page.bringToFront'), 'failure does not override visibility');
+console.log('submit flow: 9 CDP scenarios passed');

@@ -60,6 +60,7 @@ class VerificationRecovery(unittest.TestCase):
         self.assertEqual(parse_qs(urlparse(target).query)['url'], ['https://tenhou.net/0/?log=x&tw=2'])
 
     def test_failure_stage_not_wait(self):
+        self.assertEqual(M.submit_stage_of('VERIFICATION_CHECKING background'), 'CHECKING_VERIFICATION')
         self.assertEqual(M.submit_stage_of('VERIFICATION_FAILED 600010'), 'VERIFICATION_FAILED')
         self.assertEqual(M.submit_stage_of('VERIFICATION_TIMEOUT 300'), 'AWAITING_VERIFICATION')
 

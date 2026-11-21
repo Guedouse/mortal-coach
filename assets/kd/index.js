@@ -3292,6 +3292,7 @@ async function waitCoach(tag, tries = 10) {
 const SUBMIT_STAGE_CN = {
     STARTING: '正在启动浏览器',
     BROWSER_STARTING: '正在启动浏览器',
+    CHECKING_VERIFICATION: '正在后台等待网站自动验证',
     AWAITING_VERIFICATION: '等待你在浏览器里完成人机验证',
     VERIFICATION_FAILED: '人机验证失败，可以重新加载验证或改用普通浏览器',
     SUBMITTING: '正在提交到 Mortal',
