@@ -124,8 +124,19 @@ FORBIDDEN_PATTERNS = [
     (r"(^|/)\.tmp$", "临时文件"),
 ]
 
-# 泄漏扫描：文本文件里不许出现作者本机路径
-LEAK_RE = re.compile(r"[A-Za-z]:[\\/]+(?:maa|Users[\\/]+admin)", re.I)
+# 泄漏扫描：文本文件里不许出现作者本机路径。
+# 只禁「个人目录」，系统自带路径（Windows、Program Files）是正常引用，放行。
+#   1) 开发目录 / 任意用户的 home —— 盘符后跟 maa 或 Users\<某人>
+#   2) 盘符后直接跟中文目录名 —— 中文用户最容易漏掉的一种
+# 判据：盘符前后都要成立（前面不是字母/数字，避免把 https:// 里的 s: 当成盘符），
+#      分隔符是单个反斜杠或单个正斜杠（`//` 属于 URL）。
+# 注意：截图里的路径文字拦不住（二进制），图要人工看一眼。
+LEAK_RES = [
+    (re.compile(r"(?<![A-Za-z0-9+.\-])[A-Za-z]:(?:\\|/(?!/))"
+                r"(?:maa|Users[\\/]+[^\\/\s\"'<>|]+)", re.I), "本机用户目录"),
+    (re.compile(r"(?<![A-Za-z0-9+.\-])[A-Za-z]:(?:\\|/(?!/))"
+                r"[^\x00-\x7F][^\\/\r\n\"'<>|]*"), "非 ASCII 目录名"),
+]
 TEXT_EXT = {".py", ".js", ".mjs", ".json", ".md", ".html", ".css", ".bat", ".txt", ".spec", ".ini", ".cfg"}
 
 
@@ -486,17 +497,16 @@ def verify(zip_path, flavor="lite"):
             checked.append("发行配置四个路径为空、教程未读")
 
         # 本机路径泄漏
-        leaks = 0
         for n in names:
             if Path(n).suffix.lower() in TEXT_EXT:
                 try:
                     txt = z.read(n).decode("utf-8", "ignore")
                 except Exception:
                     continue
-                m = LEAK_RE.search(txt)
-                if m:
-                    leaks += 1
-                    problems.append(f"{n} 里有本机路径：{m.group(0)}")
+                for rx, why in LEAK_RES:
+                    for m in rx.finditer(txt):
+                        problems.append(f"{n} 里有{why}：{m.group(0)}")
+                        break
         checked.append(f"文本文件 {sum(1 for n in names if Path(n).suffix.lower() in TEXT_EXT)} 个无本机路径")
 
         idx = json.loads(z.read("library/coach/index.json").decode("utf-8"))

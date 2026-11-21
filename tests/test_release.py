@@ -80,5 +80,31 @@ class TestFlavorFiles(unittest.TestCase):
         self.assertIn("system", rv_full["chromium"])
 
 
+class TestLeakPatterns(unittest.TestCase):
+    """发行包里不许出现作者本机路径，但系统路径（Program Files / Windows）是正常的。
+
+    中文用户的库目录常常长成「盘符 + 中文」，旧的 `maa|Users\admin` 规则完全拦不住，
+    所以这里把两类都钉住：个人目录 + 非 ASCII 目录名。
+    """
+
+    @staticmethod
+    def hits(text):
+        return [why for rx, why in BR.LEAK_RES if rx.search(text)]
+
+    def test_personal_paths_flagged(self):
+        bs = chr(92)
+        for p in (f"D:{bs}maa", f"C:/Users/admin", f"C:{bs}Users{bs}Somebody{bs}Desktop",
+                  f"D:{bs}麻将复盘{bs}牌谱库"):
+            self.assertTrue(self.hits(p), p)
+
+    def test_system_paths_and_urls_allowed(self):
+        for p in ("C:/Program Files/Google/Chrome/Application/chrome.exe",
+                  "C:/Windows/Fonts/msyh.ttc",
+                  "https://game.maj-soul.com/1/?paipu=xxx",
+                  "https://…、根相对 /report/xxx.json",
+                  "D:/mahjong-lib"):
+            self.assertEqual(self.hits(p), [], p)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
