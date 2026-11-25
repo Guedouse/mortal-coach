@@ -3292,9 +3292,9 @@ async function waitCoach(tag, tries = 10) {
 const SUBMIT_STAGE_CN = {
     STARTING: '正在启动浏览器',
     BROWSER_STARTING: '正在启动浏览器',
-    CHECKING_VERIFICATION: '正在后台等待网站自动验证',
-    AWAITING_VERIFICATION: '等待你在浏览器里完成人机验证',
-    VERIFICATION_FAILED: '人机验证失败，可以重新加载验证或改用普通浏览器',
+    CHECKING_VERIFICATION: '正在等待网站自动验证（迟迟不动可点「显示验证窗口」）',
+    AWAITING_VERIFICATION: '请在浏览器窗口里勾选「我是人类」',
+    VERIFICATION_FAILED: '验证没通过：可点「重新加载验证」再试，或改用普通浏览器生成报告',
     SUBMITTING: '正在提交到 Mortal',
     SCORING: 'Mortal 正在评分',
     DOWNLOADING: '正在下载报告',
@@ -3365,7 +3365,7 @@ async function applySubmitResult(r, st) {
     if (!r) { st.className = 'link-status bad'; st.textContent = '没有返回结果'; return }
     if (r.status === 'verification_pending' || r.status === 'verification_failed') {
         st.className = 'link-status warn'
-        st.textContent = (r.msg || '需要你在浏览器里点一下人机验证')
+        st.textContent = (r.msg || '请在浏览器窗口里勾选「我是人类」，通过后会自动继续')
             + (r.tag ? `　（标签 ${r.tag}）` : '')
         submitActions(true)
         return

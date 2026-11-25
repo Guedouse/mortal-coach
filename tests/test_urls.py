@@ -155,40 +155,43 @@ class TestTags(unittest.TestCase):
 
 
 class TestNoTokenHint(unittest.TestCase):
-    """换机器拿不到 Turnstile token 时，三种原因要给出三种说法（不能笼统说「再点一次」）。"""
+    """拿不到验证 token 时，几种原因要给出不同说法（不能笼统说「再点一次」）。
+
+    2026-11 官网换成 hCaptcha，判定依据也从 cf 变成 hcap/rcap。
+    """
 
     def hint(self, state):
         out = "AT_HOME https://mjai.ekyu.moe/\nNO_TOKEN_STATE " + json.dumps(state) + "\nNO_TOKEN len=0"
         return M.no_token_hint(out, Path("logs/261119.log"))
 
     def test_page_not_loaded(self):
-        msg = self.hint({"form": False, "cf": True, "widget": False})
+        msg = self.hint({"form": False, "widget": False})
         self.assertIn("首页没打开", msg)
         self.assertIn("mjai.ekyu.moe", msg)
 
-    def test_cloudflare_script_blocked(self):
-        msg = self.hint({"form": True, "cf": False, "widget": True})
-        self.assertIn("challenges.cloudflare.com", msg)
+    def test_captcha_script_blocked(self):
+        msg = self.hint({"form": True, "cf": False, "hcap": False, "rcap": False, "widget": True})
+        self.assertIn("js.hcaptcha.com", msg)
 
     def test_widget_missing(self):
-        msg = self.hint({"form": True, "cf": True, "widget": False})
+        msg = self.hint({"form": True, "hcap": True, "widget": False})
         self.assertIn("没找到人机验证组件", msg)
 
     def test_manual_challenge(self):
-        msg = self.hint({"form": True, "cf": True, "widget": True, "token": 1})
-        self.assertIn("显示浏览器窗口", msg)
-        self.assertIn("确认您是真人", msg)
+        msg = self.hint({"form": True, "hcap": True, "widget": True, "token": 1})
+        self.assertIn("我是人类", msg)
+        self.assertIn("显示验证窗口", msg)
 
     def test_state_missing_still_actionable(self):
         msg = M.no_token_hint("NO_TOKEN len=0", Path("logs/261119.log"))
-        self.assertIn("分析", msg)
+        self.assertIn("我是人类", msg)
         self.assertIn("261119.log", msg)
 
     def test_last_state_wins(self):
         # 先失败在没加载，重试后变成需要人工点：以最后一次状态为准
         out = ('PAGE_STATE {"form": false, "cf": false}\n'
-               'NO_TOKEN_STATE {"form": true, "cf": true, "widget": true}\nNO_TOKEN len=0')
-        self.assertIn("确认您是真人", M.no_token_hint(out))
+               'NO_TOKEN_STATE {"form": true, "hcap": true, "widget": true}\nNO_TOKEN len=0')
+        self.assertIn("我是人类", M.no_token_hint(out))
 
 
 class TestNetErrors(unittest.TestCase):
@@ -1108,6 +1111,22 @@ class TestSubmitLifecycle(unittest.TestCase):
         js = (BASE / "tools" / "submit_auto.mjs").read_text(encoding="utf-8")
         body = js.split("const readToken", 1)[1][:400]
         self.assertIn("document.forms.reviewForm", body)
+
+    def test_captcha_fields_cover_hcaptcha(self):
+        """官网 2026-11 换成 hCaptcha：三个响应字段都得认，否则人点完也读不到 token。"""
+        js = (BASE / "tools" / "submit_auto.mjs").read_text(encoding="utf-8")
+        block = js.split("const CAPTCHA_FIELDS", 1)[1].split("]", 1)[0]
+        for name in ("h-captcha-response", "g-recaptcha-response", "cf-turnstile-response"):
+            self.assertIn(name, block)
+        body = js.split("const readToken", 1)[1][:400]
+        self.assertIn("CAPTCHA_SEL", body)      # 不许再写死某一家
+        self.assertNotIn("cf-turnstile-response']", body)
+
+    def test_verification_is_manual_by_default(self):
+        """验证由人完成：脚本默认显示窗口，程序默认 show_browser 为真。"""
+        js = (BASE / "tools" / "submit_auto.mjs").read_text(encoding="utf-8")
+        self.assertIn("cfg.show !== false", js)
+        self.assertTrue(M.DEFAULT_CONFIG["show_browser"])
 
     def test_browser_ready_requires_page_target(self):
         src = (BASE / "app" / "main.py").read_text(encoding="utf-8")

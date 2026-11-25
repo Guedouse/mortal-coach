@@ -14,7 +14,7 @@
 //   NO_PAGE / NO_TOKEN / NO_FORM / NO_REPORT_URL / REPORT_TIMEOUT / REPORT_URL
 //   EXC     | ...            Runtime.evaluate 抛异常
 // 退出码：0 成功或 dry 完成 / 1 无页面 / 2 无 token / 3 填表异常 / 4 未拿到报告页
-const BUILD = 7;   // 与 app/main.py 的 SUBMIT_BUILD 必须一致；Python 会核对
+const BUILD = 8;   // 与 app/main.py 的 SUBMIT_BUILD 必须一致；Python 会核对
 const PORT = process.env.CDP_PORT || 9222;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 console.log('SCRIPT_BUILD', BUILD);
@@ -35,11 +35,23 @@ const TEMP = (cfg.tempo || '').trim();
 const DRY = process.env.MC_DRY === '1' || !!cfg.dry;
 // 设置里勾了「显示浏览器窗口」：一进来就把窗口摆到屏幕正面，让用户能自己点验证码。
 // （窗口没被隐藏是前提 —— Python 那边给 Chrome 传 SW_HIDE 的话，这里搬也白搬）
-const SHOW = !!cfg.show;
+// 2026-11 起默认走**人工验证**：人工完成是唯一稳定的路径，机器识别 hCaptcha
+// 既不可靠也违反对方的服务条款。除非显式传 show=false，否则一律把窗口摆出来。
+const SHOW = cfg.show !== false;
 // 继续等待：浏览器和页面都还是上一轮那个，不要重新导航（会把挑战重建一次，
 // 用户刚做的一半白费）。此时只等 token，拿到就直接接着提交。
 const RESUME = !!cfg.resume;
 const HOME = 'https://mjai.ekyu.moe/';
+
+// 人机验证的响应字段与控件。
+// 2026-11 官网把 Cloudflare Turnstile 换成了 hCaptcha：页面里是 <div class="h-captcha">
+// 加 <textarea name="h-captcha-response">，reviewForm 里还留着一个 g-recaptcha-response
+// 占位。旧代码只认 cf-turnstile-response，于是人点完复选框也读不到 token，
+// 永远卡在「验证过不了」。三套字段都认，官网以后换回来也不用再改。
+const CAPTCHA_FIELDS = ['h-captcha-response', 'g-recaptcha-response', 'cf-turnstile-response'];
+const CAPTCHA_SEL = CAPTCHA_FIELDS.map((n) => `[name="${n}"]`).join(',');
+// 控件容器（用来滚动到视口、算坐标）。按「有 sitekey 属性」兜底，官网换 class 也能命中。
+const WIDGET_SEL = '.h-captcha, .cf-turnstile, #cf-turnstile, [data-sitekey]';
 
 // 最多试 3 轮。实测同一个雀魂链接偶尔会被 Mortal 判成
 // 「url is not from tenhou or mahjong soul」（服务端抓牌谱那一步抽风），
@@ -164,24 +176,25 @@ async function gotoHome() {
   return false;
 }
 
-// ---------------- 拿 Turnstile token ----------------
-// 换一台机器上最常见的三种失败，日志里必须能分辨出来：
+// ---------------- 拿人机验证 token ----------------
+// 换一台机器上最常见的几种失败，日志里必须能分辨出来：
 //   ① 首页压根没打开（断网 / 代理拦了）→ form=false
-//   ② 首页开了但 challenges.cloudflare.com 的脚本没加载 → cf=false
-//   ③ 脚本加载了，但 Cloudflare 这次要人工点「确认您是真人」→ widget=true 却迟迟没 token
+//   ② 首页开了但验证脚本没加载（hcap/rcap/cf 全 false）→ 网络或脚本被拦
+//   ③ 脚本加载了，但这次的挑战要人点一下「我是人类」→ widget=true 却迟迟没 token
 // 需要人工验证时显示窗口；不派发验证点击、不定时重载挑战。
 
 async function pageState() {
   const raw = await ev(`(()=>{
-    const w = (document.forms.reviewForm || document).querySelector('.cf-turnstile, #cf-turnstile, [data-sitekey]');
+    const w = (document.forms.reviewForm || document).querySelector(${JSON.stringify(WIDGET_SEL)});
     let box = null;
     try { const b = w && w.getBoundingClientRect(); if (b && b.width) {
       box = [Math.round(b.x), Math.round(b.y), Math.round(b.width), Math.round(b.height)]; } } catch (e) {}
-    const els = [...document.querySelectorAll('[name="cf-turnstile-response"]')];
+    const SEL = ${JSON.stringify(CAPTCHA_SEL)};
+    const els = [...document.querySelectorAll(SEL)];
     // 官网首页有 review 和 bot 两套独立控件。只有 reviewForm 里那个响应用于
     // 「提交牌谱」，拿另一个表单的响应当提交凭证只会换来 invalid captcha response。
     const rf = document.forms.reviewForm;
-    const rels = rf ? [...rf.querySelectorAll('[name="cf-turnstile-response"]')] : [];
+    const rels = rf ? [...rf.querySelectorAll(SEL)] : [];
     return JSON.stringify({
       url: location.href,
       title: (document.title || '').slice(0, 40),
@@ -191,8 +204,11 @@ async function pageState() {
       widget: !!w, box: box,
       token: els.length, tlen: els.map((e) => (e.value || '').length).join(','),
       rtoken: rels.length, rtlen: rels.map((e) => (e.value || '').length).join(','),
+      tokName: rels.map((e) => e.name + ':' + (e.value || '').length).join(' ') || '-',
       api: typeof window.turnstile,
       cf: [...document.scripts].some((s) => (s.src || '').includes('challenges.cloudflare.com')),
+      hcap: [...document.scripts].some((s) => (s.src || '').includes('hcaptcha.com')),
+      rcap: [...document.scripts].some((s) => (s.src || '').includes('recaptcha')),
       vis: document.visibilityState,
       sw: window.innerWidth, sh: window.innerHeight,
       ifr: (() => {
@@ -210,8 +226,11 @@ async function pageState() {
 // —— 之前日志里 box 一直是 y=1194（视口才 667 高），点下去等于点空气，就是这个原因。
 // 所以每滚一次都要等滚动落定再重新量，量到真的在视口里才返回。
 async function bringWidgetIntoView() {
-  const read = `(()=>{const d=(document.forms.reviewForm || document).querySelector('.cf-turnstile, #cf-turnstile, [data-sitekey]');
-    if(!d)return '';const b=d.getBoundingClientRect();
+  // 量的是控件里的 iframe（真正的复选框），不是外层容器：hCaptcha 把外层 div
+  // 交给脚本接管后高度会塌成 0，只按容器判断会得到「已经在视口里」的错误结论。
+  const read = `(()=>{const d=(document.forms.reviewForm || document).querySelector(${JSON.stringify(WIDGET_SEL)});
+    if(!d)return '';const f=d.querySelector('iframe');
+    const b=(f||d).getBoundingClientRect();
     return JSON.stringify([b.top,b.left,b.width,b.height,innerHeight]);})()`;
   for (let i = 0; i < 5; i++) {
     const r0 = await ev(read);
@@ -247,10 +266,11 @@ async function showWindow() {
 // 只复用浏览器会话；token 一次性使用。
 const usedTokens = new Set();
 // 只认 reviewForm 里的响应；找不到表单时才退回全页面（此时也不会真的提交）
+// 字段按 hCaptcha → reCAPTCHA → Turnstile 的顺序找，取第一个长度够的。
 const readToken = () => ev(`(()=>{
+  const SEL = ${JSON.stringify(CAPTCHA_SEL)};
   const f = document.forms.reviewForm;
-  const els = f ? [...f.querySelectorAll('[name="cf-turnstile-response"]')]
-                : [...document.querySelectorAll('[name="cf-turnstile-response"]')];
+  const els = f ? [...f.querySelectorAll(SEL)] : [...document.querySelectorAll(SEL)];
   for (const el of els) { if (el.value && el.value.length > 50) return el.value; }
   return '';
 })()`);
@@ -278,7 +298,7 @@ async function waitToken() {
   if (SHOW) {
     console.log('WINDOW_SHOWN 0', await showWindow());
     console.log('WIDGET_IN_VIEW', JSON.stringify(await bringWidgetIntoView()));
-    console.log('NEED_MANUAL', '请在浏览器中完成人机验证，完成后会自动继续');
+    console.log('NEED_MANUAL', '请在浏览器窗口里勾选「我是人类」（需要时按提示选图），通过后会自动继续');
     console.log('VERIFICATION_REQUIRED manual');
   } else {
     // Respect the visibility preference: slow automatic verification is not proof
@@ -329,6 +349,7 @@ async function waitToken() {
       nextLog = sec + 15;
       console.log('TOKEN_WAIT', 0, sec + 's', JSON.stringify({
         form: st.form, widget: st.widget, api: st.api, cf: st.cf,
+        hcap: st.hcap, rcap: st.rcap, tok: st.tokName,
         rtoken: st.rtoken, rtlen: st.rtlen, vis: st.vis,
       }));
     }

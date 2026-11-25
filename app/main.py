@@ -154,7 +154,7 @@ DEFAULT_CONFIG = {
     "chrome": "",           # 浏览器路径；留空 = 自动查找 Chrome / Edge
     "python": "",           # 解读流水线解释器；留空 = 包内 runtime 或系统 Python
     "node": "",             # 提交脚本运行时；留空 = 包内 runtime 或系统 Node
-    "show_browser": False,  # 提交牌谱时是否把浏览器窗口显示出来（默认挪到屏幕外）
+    "show_browser": True,   # 提交牌谱时显示浏览器：验证码统一由人完成（默认开）
     # 恶手门槛与分级：门槛之上全部解析，严重 / 中等只区分权重差（巡目颜色）
     #   thresh = 权重差入库门槛 → 低于它的手不进库（改完要重跑流水线）
     #   gap    = 门槛之上再分「严重」，其余为「中等」
@@ -290,6 +290,17 @@ def load_config():
                     break
         except Exception:
             continue
+    # 2026-11 官网把 Turnstile 换成 hCaptcha，验证统一改由人完成：老配置里
+    # show_browser=false（以前默认把窗口挪到屏幕外）不再适用，一次性改回 true。
+    # ui 里留标记保证只改这一次 —— 用户以后主动取消勾选仍然有效。
+    if not cfg["ui"].get("captcha_manual_v1"):
+        cfg["ui"]["captcha_manual_v1"] = True
+        if cfg.get("show_browser") is False:
+            cfg["show_browser"] = True
+        try:
+            save_config(cfg)
+        except Exception:
+            pass
     return cfg
 
 
@@ -1003,10 +1014,10 @@ CHROME_VER = ""
 # 「源码修好了、EXE 还是旧的」这种混合状态，所以把身份显式报出来：
 #   - EXE 构建时间取可执行文件自身的修改时间（改名/重打包必然变化）
 #   - 外置 JS 自带 SCRIPT_BUILD，两边不一致时日志与设置里直接标红
-SUBMIT_BUILD = 7          # 必须与 tools/submit_auto.mjs 的 BUILD 一致
-# 勾了「显示浏览器」时等用户点验证的上限（秒）。MC_MANUAL_WAIT 只给排查/自测用。
+SUBMIT_BUILD = 8          # 必须与 tools/submit_auto.mjs 的 BUILD 一致
+# 等用户点验证的上限（秒）。MC_MANUAL_WAIT 只给排查/自测用。
 MANUAL_WAIT_SEC = int(os.environ.get("MC_MANUAL_WAIT") or 300)
-APP_BUILD = "2026-11-21"  # 源码构建号，发版时更新
+APP_BUILD = "2026-11-25"  # 源码构建号，发版时更新
 
 
 def _exe_timestamp():
@@ -1104,10 +1115,10 @@ def submit_stage_of(line):
 def no_token_hint(out, logp=None):
     """把 submit_auto 的 PAGE_STATE / NO_TOKEN_STATE 翻成用户能照做的说明。
 
-    换机器后拿不到 Turnstile token 基本就三种：
+    2026-11 官网把验证码换成了 hCaptcha，拿不到 token 基本就三种：
       ① 首页压根没打开（断网 / 代理拦了）→ form=false
-      ② 首页开了但 challenges.cloudflare.com 的脚本没加载 → cf=false
-      ③ 脚本加载了，Cloudflare 这次要人工点「确认您是真人」→ 其余情况
+      ② 首页开了但验证脚本没加载（hcap / rcap / cf 全 false）→ 网络问题
+      ③ 脚本在、没人点复选框（tokName 里各字段长度都是 0）→ 等人工完成
     """
     st = {}
     for raw in re.findall(r"^(?:PAGE_STATE|NO_TOKEN_STATE)\s+(\{.*\})\s*$", out, re.M):
@@ -1120,15 +1131,15 @@ def no_token_hint(out, logp=None):
     if st.get("form") is False:
         msg = ("Chrome 里 Mortal 首页没打开（找不到提交表单）。这台机器到 mjai.ekyu.moe 的"
                "网络不通，或被代理 / 防火墙拦了 —— 先用浏览器打开 https://mjai.ekyu.moe/ 确认能加载。")
-    elif st.get("cf") is False:
-        msg = ("首页开了，但人机验证的脚本（challenges.cloudflare.com）没加载出来，"
-               "属于网络问题：连不上 Cloudflare，换个网络或开代理再试。")
     elif st.get("widget") is False:
         msg = ("首页里没找到人机验证组件，可能页面只加载了一半。"
                "把那个 Chrome 窗口关掉，再点一次「分析」。")
+    elif st and not (st.get("hcap") or st.get("rcap") or st.get("cf")):
+        msg = ("首页开了，但人机验证的脚本（js.hcaptcha.com）没加载出来，属于网络问题："
+               "连不上验证服务，换个网络或检查代理后再试。")
     else:
-        msg = ("人机验证这次要人工确认，自动点的没通过。程序会把 Chrome 窗口搬到屏幕正面："
-               "在设置里勾上「显示浏览器窗口」再点一次「分析」，看到「确认您是真人」就点一下。")
+        msg = ("验证还没做完：请在打开的浏览器窗口里勾选「我是人类」（需要时按提示选图）。"
+               "看不到窗口就点「显示验证窗口」，通过后程序会自动继续。")
     if logp is not None:
         msg += f"（详细过程见 logs/{Path(logp).name}）"
     return msg
@@ -1304,7 +1315,13 @@ def cdp_browser_close(port):
 
 
 def repair_chrome_prefs(prof):
-    """启动前把上次的「异常退出」标记抹掉，避免恢复页面气泡。"""
+    """启动前改两处 profile 设置。
+
+    ① 抹掉上次的「异常退出」标记，避免「恢复页面」气泡；
+    ② 关掉翻译提醒：Chrome 认为页面不是中文就会弹「是否翻译此网页」小框，
+       窗口现在默认摆到前台给人点验证码，那个小框正好压在控件上。
+       translate.enabled=false 等价于在设置里取消勾选「询问是否翻译…」。
+    """
     for rel in ("Default/Preferences", "Preferences", "Local State"):
         f = Path(prof) / rel
         if not f.exists():
@@ -1315,15 +1332,25 @@ def repair_chrome_prefs(prof):
             continue
         if not isinstance(d, dict):
             continue
+        changed = False
         if rel.endswith("Local State"):
             pr = d.get("profile")
-            if isinstance(pr, dict):
-                pr.pop("exit_type", None)
-            continue
-        pr = d.setdefault("profile", {})
-        if pr.get("exit_type") != "Normal" or pr.get("exited_cleanly") is not True:
-            pr["exit_type"] = "Normal"
-            pr["exited_cleanly"] = True
+            if isinstance(pr, dict) and pr.pop("exit_type", None) is not None:
+                changed = True
+        else:
+            pr = d.setdefault("profile", {})
+            if pr.get("exit_type") != "Normal" or pr.get("exited_cleanly") is not True:
+                pr["exit_type"] = "Normal"
+                pr["exited_cleanly"] = True
+                changed = True
+            tr = d.get("translate")
+            if not isinstance(tr, dict):
+                tr = {}
+                d["translate"] = tr
+            if tr.get("enabled") is not False:
+                tr["enabled"] = False
+                changed = True
+        if changed:
             try:
                 f.write_text(json.dumps(d, ensure_ascii=False), encoding="utf-8")
             except Exception:
@@ -1917,7 +1944,7 @@ class Api:
                          "--disable-background-timer-throttling",
                          "--disable-renderer-backgrounding",
                          "--disable-backgrounding-occluded-windows",
-                         "--disable-features=CalculateNativeWinOcclusion,Translate,MediaRouter",
+                         "--disable-features=CalculateNativeWinOcclusion,Translate,TranslateUI,MediaRouter",
                          "https://mjai.ekyu.moe/"], stdout=subprocess.DEVNULL,
                          stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace",
                          **gui_process_kwargs())
@@ -2447,14 +2474,14 @@ class Api:
                     submit_state_set(stage="VERIFICATION_FAILED", resumable=True)
                     raise ReportError(
                         "VERIFICATION_FAILED",
-                        f"Cloudflare 验证失败（错误码 {code}）。本次尚未提交牌谱，验证窗口已保留。"
+                        f"人机验证报错（代码 {code}）。本次尚未提交牌谱，验证窗口已保留。"
                         "可以点「重新加载验证」重试；若普通浏览器能通过，请点「使用普通浏览器生成报告」，"
                         "生成报告后将报告地址粘贴回来分析。")
                 raise ReportError(
                     "VERIFICATION_PENDING",
-                    "这次验证还没完成。请点「显示验证窗口」，在浏览器里手动确认。"
+                    "验证还没完成：请在浏览器窗口里勾选「我是人类」（需要时按提示选图）。"
                     "本次等待已暂停，完成验证后点「继续等待」提交牌谱；"
-                    "如果窗口显示失败，请点「重新加载验证」；普通浏览器能通过时，也可以切换到普通浏览器生成报告。")
+                    "看不到窗口就点「显示验证窗口」；普通浏览器能通过时，也可以切换到普通浏览器生成报告。")
             if "NO_TOKEN" in out:
                 raise ReportError("NO_TOKEN", no_token_hint(out, self._logfile(tag)))
             if "NO_PAGE" in out:
@@ -2547,11 +2574,10 @@ class Api:
                 "log": str(self._logfile(tag))}
 
         if status.get("status") == "ok":
-            if CONFIG.get("show_browser"):
-                # 勾了「显示浏览器」：窗口留到应用退出。同一浏览器身份 + 同一
-                # 资料目录，下一局直接复用，不用重新启动、也不必重新过验证。
-                self._keep_chrome = True
-                self._pending = {}
+            # 分析成功后不再把浏览器窗口留到应用退出：验证码现在由人完成，
+            # 常驻一个 Chrome 只会挡住别的窗口。profile 照样留着，
+            # 已通过的记录和 cookie 不会丢，下次启动还是同一个浏览器身份。
+            self._pending = {}
             msg = (f"完成：{bad} 手解读已生成（{head}）" if bad
                    else f"完成：这一局没有超过 30pt 阈值的恶手（{head}）")
             return dict(base, ok=True, msg=msg, elapsed=round(time.time() - t0))

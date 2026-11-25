@@ -218,8 +218,9 @@
                             <kbd>N</kbd> 跳到下一处恶手。</span></li>
                 </ol>
                 <div class="wl-note">
-                    <b>卡住了？</b>九成是网络或浏览器。在设置里勾上「显示浏览器窗口」再点一次「分析」，
-                    就能看见它停在哪一步；完整排查见程序目录下 <code>docs/5_常见问题.md</code>。
+                    <b>卡住了？</b>九成是网络或浏览器。分析时会自动打开浏览器窗口，验证码就在里面勾；
+                    如果窗口没出来，到设置里确认「分析时显示浏览器窗口」是开着的，再点一次「分析」。
+                    完整排查见程序目录下 <code>docs/5_常见问题.md</code>。
                 </div>
             </div>
             <div class="st-foot wl-foot">
@@ -255,10 +256,11 @@
                 </section>
                 <section class="st-sec">
                     <h4>提交用的浏览器</h4>
-                    <p class="st-hint">提交牌谱要过一个真人验证，程序会开一个独立的浏览器窗口。
-                        默认把它挪到屏幕外，跑完自动正常关闭，不会弹「未正常关闭」。</p>
+                    <p class="st-hint">提交牌谱要过一道人机验证（官网现在用 hCaptcha）。程序会开一个独立的
+                        浏览器窗口并把它摆到前台，你在里面勾一下「我是人类」，通过后自动继续——这是唯一稳定的方式，
+                        机器识别既不靠谱也违反对方条款。</p>
                     <label class="st-check"><input type="checkbox" id="st-show-browser">
-                        分析时显示浏览器（未勾选时后台等待，需人工确认请点「显示验证窗口」）</label>
+                        分析时显示浏览器窗口（默认开启；取消勾选则后台等待，需要时再点「显示验证窗口」）</label>
                     <div class="st-row">
                         <input id="st-chrome" placeholder="留空 = 自动查找 Chrome / Edge" spellcheck="false">
                         <button type="button" id="st-chrome-pick">选择…</button>
