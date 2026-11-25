@@ -2472,8 +2472,15 @@ function renderHistory() {
     }
     box.innerHTML = rows.map(x => {
         const on = (curTag() || sessionStorage.getItem('mc_last_tag') || '') === x.tag ? ' is-current' : ''
+        // 最终顺位：日期后面跟一个小徽章（1~4 位），旧局的索引里没有 place 就不显示
+        const place = Number(x.place || 0)
+        const badge = (place >= 1 && place <= 4)
+            ? '<i class="hr-place p' + place + '" title="最终 '
+              + (x.score == null ? '—' : esc(x.score) + ' 点') + '">' + place + '位</i>'
+            : ''
         return '<div class="history-row' + on + '" data-tag="' + esc(x.tag) + '">'
-            + '<div class="hr-main"><b>' + esc(x.date || x.tag) + ' · ' + esc(x.tag) + '</b>'
+            + '<div class="hr-main"><b><span>' + esc(x.date || x.tag) + ' · ' + esc(x.tag) + '</span>'
+            + badge + '</b>'
             + '<small>rating ' + (x.rating == null ? '—' : x.rating)
             + ' · 恶手 ' + (x.bad || 0) + ' 手 · ' + (x.kyoku || 0) + ' 局</small></div>'
             + '<span><button data-open="' + esc(x.tag) + '">打开</button>'
@@ -3085,8 +3092,6 @@ async function openSettings() {
         setV('st-chrome', s.chrome)
         setV('st-python', s.python)
         setV('st-node', s.node)
-        const cb = document.getElementById('st-show-browser')
-        if (cb) cb.checked = !!s.show_browser
         const cnt = document.getElementById('st-count')
         if (cnt && s.counts) {
             cnt.textContent = `${s.counts.games} 局 · ${s.counts.reports} 份报告 · `
@@ -3120,7 +3125,6 @@ async function saveSettings() {
         chrome: $v('st-chrome').trim(),
         python: $v('st-python').trim(),
         node: $v('st-node').trim(),
-        show_browser: !!(document.getElementById('st-show-browser') || {}).checked,
         bad: bad,
     }
     if (msg) msg.textContent = '保存中…'
@@ -3292,9 +3296,9 @@ async function waitCoach(tag, tries = 10) {
 const SUBMIT_STAGE_CN = {
     STARTING: '正在启动浏览器',
     BROWSER_STARTING: '正在启动浏览器',
-    CHECKING_VERIFICATION: '正在等待网站自动验证（迟迟不动可点「显示验证窗口」）',
+    CHECKING_VERIFICATION: '正在检查人机验证状态（看不到窗口就点「显示验证窗口」）',
     AWAITING_VERIFICATION: '请在浏览器窗口里勾选「我是人类」',
-    VERIFICATION_FAILED: '验证没通过：可点「重新加载验证」再试，或改用普通浏览器生成报告',
+    VERIFICATION_FAILED: '验证没通过：点「重新加载验证」再试一次',
     SUBMITTING: '正在提交到 Mortal',
     SCORING: 'Mortal 正在评分',
     DOWNLOADING: '正在下载报告',
@@ -3309,7 +3313,7 @@ function submitActions(show) {
 }
 
 function submissionBusy(busy) {
-    for (const id of ['link-go', 'sb-resume', 'sb-retry', 'sb-official']) {
+    for (const id of ['link-go', 'sb-resume', 'sb-retry']) {
         const el = document.getElementById(id)
         if (el) el.disabled = busy
     }
@@ -3465,17 +3469,6 @@ function wireSubmitActions() {
         retry.disabled = true
         const r = await api().request_verification_reload()
         if (st) { st.className = 'link-status warn'; st.textContent = r.msg || '' }
-    }
-    const official = document.getElementById('sb-official')
-    if (official) official.onclick = async () => {
-        const fn = api().open_official_review
-        if (!fn) return
-        submissionBusy(true)
-        try {
-            const r = await fn((document.getElementById('link-input') || {}).value || '')
-            if (r.ok) { stopSubmitPoll(); submitActions(false) }
-            if (st) { st.className = 'link-status ' + (r.ok ? 'warn' : 'bad'); st.textContent = r.msg || '' }
-        } finally { submissionBusy(false) }
     }
     if (cancel) cancel.onclick = async () => {
         const fn = api().cancel_submit

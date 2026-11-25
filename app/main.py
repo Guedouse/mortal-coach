@@ -60,8 +60,7 @@ def gui_process_kwargs():
 
     STARTF_USESHOWWINDOW + SW_HIDE 会作用到进程的顶层窗口，Chrome 照做 ——
     窗口建出来就是隐藏的，`--window-position` 放哪儿都看不见，
-    设置里勾了「显示浏览器窗口」也没用，人机验证就永远没人能点。
-    要「用户看不到」请用 `--window-position=-32000,-32000` 挪到屏幕外。
+    用来放验证码的窗口就永远没人能点。
     """
     kw = {}
     if os.name == "nt":
@@ -154,7 +153,6 @@ DEFAULT_CONFIG = {
     "chrome": "",           # 浏览器路径；留空 = 自动查找 Chrome / Edge
     "python": "",           # 解读流水线解释器；留空 = 包内 runtime 或系统 Python
     "node": "",             # 提交脚本运行时；留空 = 包内 runtime 或系统 Node
-    "show_browser": True,   # 提交牌谱时显示浏览器：验证码统一由人完成（默认开）
     # 恶手门槛与分级：门槛之上全部解析，严重 / 中等只区分权重差（巡目颜色）
     #   thresh = 权重差入库门槛 → 低于它的手不进库（改完要重跑流水线）
     #   gap    = 门槛之上再分「严重」，其余为「中等」
@@ -290,17 +288,9 @@ def load_config():
                     break
         except Exception:
             continue
-    # 2026-11 官网把 Turnstile 换成 hCaptcha，验证统一改由人完成：老配置里
-    # show_browser=false（以前默认把窗口挪到屏幕外）不再适用，一次性改回 true。
-    # ui 里留标记保证只改这一次 —— 用户以后主动取消勾选仍然有效。
-    if not cfg["ui"].get("captcha_manual_v1"):
-        cfg["ui"]["captcha_manual_v1"] = True
-        if cfg.get("show_browser") is False:
-            cfg["show_browser"] = True
-        try:
-            save_config(cfg)
-        except Exception:
-            pass
+    # 2026-11 官网把 Turnstile 换成 hCaptcha，验证统一改由人完成，浏览器窗口必须
+    # 显示出来 —— 旧配置里的 show_browser 开关已废弃（不再进 DEFAULT_CONFIG，
+    # 老配置里留着也不会被读进来），窗口位置恒为可见。
     return cfg
 
 
@@ -1667,7 +1657,6 @@ class Api:
             # 界面内核：随包固定版优先，否则系统 Evergreen（版本号 / 路径）
             "webview2_found": (WEBVIEW2 or WEBVIEW2_SYS or
                                (("系统 " + WEBVIEW2_VER) if WEBVIEW2_VER else "")),
-            "show_browser": bool(CONFIG.get("show_browser")),
             "bad": CONFIG.get("bad") or dict(DEFAULT_CONFIG["bad"]),
             "ui": CONFIG.get("ui") or {},
             "app_root": str(APP_ROOT),
@@ -1795,8 +1784,6 @@ class Api:
                 if status == "ok":
                     pre_lock = (h, want)
             cfg["library"] = raw
-        if "show_browser" in patch:
-            cfg["show_browser"] = bool(patch.get("show_browser"))
         if isinstance(patch.get("bad"), dict):
             # 深合并：只提交 thresh / gap / loss 里的一部分时，其余保持原值
             cur = norm_bad(cfg.get("bad"))
@@ -1885,10 +1872,10 @@ class Api:
 
     # ---------- Chrome ----------
     def ensure_chrome(self):
-        """复盘要一个带界面的浏览器来拿 Turnstile token。
+        """复盘要一个带界面的浏览器来拿 hCaptcha token。
 
-        窗口默认挪到屏幕外（用户看不到，也不抢焦点）；设置里可以改成显示，
-        方便自己处理验证码。关闭走 CDP Browser.close，profile 干净、不会弹崩溃恢复。
+        验证统一由人完成，窗口必须可见：启动即摆到 (0,0) 并置前，
+        关掉走 CDP Browser.close，profile 干净、不会弹崩溃恢复。
 
         **只用自己启动的实例**：系统分配空闲端口，以明确的非零值传给浏览器。
         读取本次子进程输出的 Browser 端点并与 HTTP 端点核对；端口通了并不能证明归属。
@@ -1917,7 +1904,7 @@ class Api:
             (Path(prof) / "DevToolsActivePort").unlink()
         except OSError:
             pass
-        pos = "0,0" if CONFIG.get("show_browser") else "-32000,-32000"
+        pos = "0,0"      # 验证由人完成，窗口一律摆到可见位置
 
         # 路径存在 ≠ 能跑：残缺安装、被组策略拦、指向已删目录的快捷方式都见过。
         # 所以逐个**试启动**，最多 3 个候选；一旦调试端口通了就固定下来，绝不
@@ -2143,7 +2130,7 @@ class Api:
                 elif ln.startswith("VERIFICATION_TIMEOUT"):
                     submit_state_set(resumable=True)
                 elif ln.startswith("VERIFICATION_FAILED"):
-                    submit_state_set(detail="验证失败，可重新加载验证或改用普通浏览器",
+                    submit_state_set(detail="验证失败，可点「重新加载验证」重试",
                                      resumable=True)
         finally:
             self._node_proc = None
@@ -2162,8 +2149,7 @@ class Api:
         st.update({"app_build": build_id(), "submit_build": SUBMIT_BUILD,
                    "browser": CHROME or "", "browser_state": CHROME_STATE,
                    "browser_version": CHROME_VER, "browser_source": CHROME_SOURCE,
-                   "browser_note": CHROME_NOTE,
-                   "show_browser": bool(CONFIG.get("show_browser"))})
+                   "browser_note": CHROME_NOTE})
         return st
 
     def show_verification_browser(self):
@@ -2305,27 +2291,6 @@ class Api:
                                     tag=p.get("tag") or None, resume=True,
                                     reload_verification=reload_page)
 
-    def open_official_review(self, url=""):
-        """在用户默认浏览器打开官网，沿用其正常浏览环境；不读取其资料。"""
-        if not self._begin_op("切换到普通浏览器"):
-            return {"ok": False, "msg": "请先取消当前分析，再切换到普通浏览器。"}
-        try:
-            value = normalize_pasted_input(url)
-            target = "https://mjai.ekyu.moe/"
-            if re.match(r"^https?://", value, re.I):
-                from urllib.parse import urlencode
-                target += "?" + urlencode({"url": value})
-            # 用户明确选择切换路径，停止旧的待验证任务，避免两个入口同时提交。
-            self.cancel_submit()
-            import webbrowser
-            if not webbrowser.open(target, new=2):
-                return {"ok": False, "msg": "未能打开默认浏览器，请手动打开 https://mjai.ekyu.moe/"}
-            return {"ok": True, "msg": "已打开普通浏览器。请核对模型和座次并生成报告，再复制最终报告页地址回到输入框，点「分析」。"}
-        except Exception as e:
-            return {"ok": False, "msg": f"打开普通浏览器失败：{e}"}
-        finally:
-            self._end_op()
-
     def _submit_guarded(self, url, fmt, model, seat, tag=None, resume=False,
                         reload_verification=False):
         if not LIB_EXCLUSIVE:
@@ -2453,7 +2418,7 @@ class Api:
             # 它会等到表单真的出现，失败时明确输出 PAGE_LOAD_FAILED。
             cfg = json.dumps({"url": url, "format": fmt, "model": model,
                               "seat": seat, "kyokus": "", "tempo": "",
-                              "show": bool(CONFIG.get("show_browser")),
+                              "show": True,
                               "resume": bool(resume),
                               "reload": bool(reload_verification),
                               "wait": MANUAL_WAIT_SEC}, ensure_ascii=False)
@@ -2475,13 +2440,12 @@ class Api:
                     raise ReportError(
                         "VERIFICATION_FAILED",
                         f"人机验证报错（代码 {code}）。本次尚未提交牌谱，验证窗口已保留。"
-                        "可以点「重新加载验证」重试；若普通浏览器能通过，请点「使用普通浏览器生成报告」，"
-                        "生成报告后将报告地址粘贴回来分析。")
+                        "点「重新加载验证」可以在这同一个窗口里重来一次。")
                 raise ReportError(
                     "VERIFICATION_PENDING",
                     "验证还没完成：请在浏览器窗口里勾选「我是人类」（需要时按提示选图）。"
                     "本次等待已暂停，完成验证后点「继续等待」提交牌谱；"
-                    "看不到窗口就点「显示验证窗口」；普通浏览器能通过时，也可以切换到普通浏览器生成报告。")
+                    "看不到窗口就点「显示验证窗口」。")
             if "NO_TOKEN" in out:
                 raise ReportError("NO_TOKEN", no_token_hint(out, self._logfile(tag)))
             if "NO_PAGE" in out:
@@ -2527,6 +2491,12 @@ class Api:
         if not direct_data:
             report_url = m.group(1)
             say(f"REPORT_URL_READY {report_url}")
+            # Mortal 把报告地址交出来的这一刻，浏览器就没用了：立即关掉。
+            # 后面的下载报告 + 生成解读要十几秒到几分钟，窗口一直杵在前面很碍事。
+            self._keep_chrome = False
+            if self._owns_chrome:
+                self.close_owned_chrome()
+                say("BROWSER_CLOSED 报告地址已拿到，验证窗口已关闭")
             data_urls = data_url_candidates(report_url)
         say(f"报告数据 {data_urls[0]}")
         payload, info = fetch_report(data_urls)

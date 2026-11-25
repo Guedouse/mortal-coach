@@ -1122,11 +1122,14 @@ class TestSubmitLifecycle(unittest.TestCase):
         self.assertIn("CAPTCHA_SEL", body)      # 不许再写死某一家
         self.assertNotIn("cf-turnstile-response']", body)
 
-    def test_verification_is_manual_by_default(self):
-        """验证由人完成：脚本默认显示窗口，程序默认 show_browser 为真。"""
+    def test_verification_is_manual_and_window_always_visible(self):
+        """验证由人完成：脚本默认显示窗口，程序恒把窗口摆到可见位置。"""
         js = (BASE / "tools" / "submit_auto.mjs").read_text(encoding="utf-8")
         self.assertIn("cfg.show !== false", js)
-        self.assertTrue(M.DEFAULT_CONFIG["show_browser"])
+        src = (BASE / "app" / "main.py").read_text(encoding="utf-8")
+        self.assertIn('"show": True', src)          # 不再受设置开关控制
+        self.assertNotIn("st-show-browser", (BASE / "assets" / "kd" / "index.html").read_text(encoding="utf-8"))
+        self.assertNotIn("show_browser", M.DEFAULT_CONFIG)
 
     def test_browser_ready_requires_page_target(self):
         src = (BASE / "app" / "main.py").read_text(encoding="utf-8")

@@ -38,27 +38,6 @@ class VerificationRecovery(unittest.TestCase):
                                         resume=True, reload_verification=True)
         api._owns_chrome = False
 
-    def test_official_fallback_refuses_active_operation(self):
-        api = M.Api()
-        api._begin_op('analysis')
-        try:
-            with patch('webbrowser.open') as open_browser:
-                self.assertFalse(api.open_official_review('https://tenhou.net/')['ok'])
-                open_browser.assert_not_called()
-        finally:
-            api._end_op()
-
-    def test_official_fallback_stops_pending_and_encodes_url(self):
-        api = M.Api()
-        api._pending = {'tag': 'job'}
-        with patch('webbrowser.open', return_value=True) as open_browser:
-            r = api.open_official_review('https://tenhou.net/0/?log=x&tw=2')
-        self.assertTrue(r['ok'])
-        self.assertFalse(api._pending)
-        from urllib.parse import urlparse, parse_qs
-        target = open_browser.call_args.args[0]
-        self.assertEqual(parse_qs(urlparse(target).query)['url'], ['https://tenhou.net/0/?log=x&tw=2'])
-
     def test_failure_stage_not_wait(self):
         self.assertEqual(M.submit_stage_of('VERIFICATION_CHECKING background'), 'CHECKING_VERIFICATION')
         self.assertEqual(M.submit_stage_of('VERIFICATION_FAILED 600010'), 'VERIFICATION_FAILED')

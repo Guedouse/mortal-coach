@@ -664,7 +664,21 @@ body.home-mode .coach-panel{ display: none !important; }
     border-radius: 6px;
 }
 .hv-card .history-row:hover{ background: hsla(190, 100%, 45%, 0.13); }
-.hv-card .history-row b{ font-size: 13px; color: #fff; font-weight: 600; }
+.hv-card .history-row b{ font-size: 13px; color: #fff; font-weight: 600;
+    display: flex; align-items: center; gap: 7px; }
+/* 最终顺位徽章：日期后面那一个小标签（1 金 / 2 银 / 3 铜 / 4 灰） */
+.hv-card .history-row .hr-place{
+    font-style: normal; font-size: 10.5px; line-height: 1; font-weight: 700;
+    padding: 3px 5px; border-radius: 4px; flex: none; letter-spacing: .02em;
+}
+.hv-card .history-row .hr-place.p1{ color:#f2c96b; background:hsla(43,90%,55%,.16);
+    box-shadow: inset 0 0 0 1px hsla(43,90%,55%,.38); }
+.hv-card .history-row .hr-place.p2{ color:#cfe0e8; background:hsla(200,25%,80%,.14);
+    box-shadow: inset 0 0 0 1px hsla(200,25%,80%,.28); }
+.hv-card .history-row .hr-place.p3{ color:#e6a878; background:hsla(24,80%,55%,.14);
+    box-shadow: inset 0 0 0 1px hsla(24,80%,55%,.30); }
+.hv-card .history-row .hr-place.p4{ color:hsla(190,30%,96%,.5); background:hsla(190,20%,70%,.09);
+    box-shadow: inset 0 0 0 1px hsla(190,20%,70%,.20); }
 .hv-card .history-row small{ font-size: 11.5px; margin-top: 3px; }
 .hv-card .history-row.is-current{ box-shadow: inset 0 0 0 1px hsla(190, 100%, 55%, 0.65); }
 .hv-card .history-row button{ font-size: 12px; padding: 5px 9px; }

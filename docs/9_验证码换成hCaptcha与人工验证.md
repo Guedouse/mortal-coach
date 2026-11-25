@@ -1,4 +1,4 @@
-# 验证码换成 hCaptcha：改为统一人工验证（build 8）
+# 验证码换成 hCaptcha：改为统一人工验证（build 8 → 9）
 
 ## 现象
 
@@ -74,7 +74,7 @@ reviewForm 字段：… g-recaptcha-response, h-captcha-response, submitBtn
 | `hcap:false` 且 `rcap:false`、`cf:false` | 验证脚本没加载 | 网络/代理拦了 `js.hcaptcha.com`、`newassets.hcaptcha.com`；换网络或关掉代理 |
 | `widget:true`、`tokName:"h-captcha-response:0"` 一直不变 | 脚本在、没人点 | 在窗口里点复选框；看不到窗口点「显示验证窗口」 |
 | 点完出现图片挑战 | hCaptcha 要求二次确认 | 按提示选图，选完自动继续 |
-| `VERIFICATION_FAILED` | 挑战本身报错 | 点「重新加载验证」，或改用普通浏览器生成报告后粘回地址 |
+| `VERIFICATION_FAILED` | 挑战本身报错 | 点「重新加载验证」；仍不行就用日常浏览器生成报告后把地址粘回输入框 |
 | 弹「是否翻译此网页」 | 旧版本没关翻译 | build 8 已关闭（profile 级 + 启动参数）；仍出现就把该 Chrome 窗口关掉重开 |
 
 ## 验证记录（2026-11-25）
@@ -88,3 +88,27 @@ reviewForm 字段：… g-recaptcha-response, h-captcha-response, submitBtn
 - `WIDGET_IN_VIEW` 实测 `[295, 24, 302, 76, 667]`：定位到的是控件内部的 iframe
   （外层 div 被 hCaptcha 接管后高度会塌成 0，按容器量会误判「已经在视口里」）。
 - `--selftest` 报 `submit_build 8`；日志首行 `SCRIPT_BUILD 8` 与程序一致；137 项测试通过。
+
+## build 9：清掉两个已经不起作用的入口，窗口提前关闭
+
+build 8 把验证改成人工之后，界面上还剩两处容易误导人的东西，顺手一并处理：
+
+1. **去掉首页「使用普通浏览器生成报告」按钮**。它做的事情只是拿系统默认浏览器打开
+   `mjai.ekyu.moe`，并没有绕过「提交时必须过验证」这件事；保留按钮反而让人以为
+   点了就能自动生成报告。备用路径仍然可用，只是不必再占用一个按钮：
+   用日常浏览器在官网生成报告 → 复制报告页地址 → 贴回输入框点「分析」
+   （`report_data_candidates_from_input` 直接下载通道不变）。
+   同时删除后端 `Api.open_official_review` 与其测试。
+2. **去掉设置里的「分析时显示浏览器窗口」开关**。验证既然只能人工完成，
+   窗口就必须显示；这个开关唯一的效果是「取消勾选后验证永远没人点」。
+   现在 `ensure_chrome` 的 `--window-position` 固定为 `0,0`，提交脚本恒收到 `"show": true`，
+   设置页换成一行说明。`DEFAULT_CONFIG`、`get_settings`、`set_settings`、发行配置里的
+   `show_browser` 一并移除；`load_config` 只接受 `DEFAULT_CONFIG` 里存在的键，
+   老配置里残留的 `show_browser` 会被自然忽略，不需要迁移代码。
+3. **浏览器关闭时机提前到「报告地址到手」那一刻**。以前 `close_owned_chrome()` 在
+   `_submit_guarded` 的 `finally` 里执行，要等 `_submit` 跑完 —— 包括下载报告 JSON
+   和 `pipeline_one.py` 生成解读（16~33 秒，慢时更久）。现在 `REPORT_URL_READY`
+   一打印就关闭，日志里多一行 `BROWSER_CLOSED`。下载与解读都用 Python 直接读网络/本地
+   文件，不再需要浏览器。
+
+验证：135 项单元测试通过（删掉 2 项 `open_official_review` 用例、改写 1 项验证开关用例）。

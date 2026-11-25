@@ -17,6 +17,7 @@ P = Path(os.environ.get("MC_APP") or Path(__file__).resolve().parent.parent)
 LIB = Path(os.environ.get("MC_LIB") or P / "library")
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import explain as X          # noqa: E402  只用来把整段文字切成「一页一个思考点」
+from gamescore import final_place  # noqa: E402  最终顺位（日期后面那个 N位 徽章）
 import paths as PATHS        # noqa: E402
 import yakucalc as YK        # noqa: E402  手牌分组（前端画「切法示意图」用）
 # 导出会重写 coach/index.json：写之前先过锁闸。父进程（界面 / pipeline / refresh）
@@ -138,6 +139,7 @@ for rp in sorted((LIB / "report").glob("*.json")):
         fails.append(tag)
         continue
     moves = by_game.get(tag, {})
+    place, score = final_place(d)
     try:
         out_path = OUT / f"{tag}.json"
         tmp = OUT / f".{tag}.json.tmp"
@@ -156,8 +158,11 @@ for rp in sorted((LIB / "report").glob("*.json")):
         "kyoku": kyoku_n,
         "model": model,
         "bad": len(moves),
+        "place": place,        # 最终顺位 1~4（前端放在日期后面）
+        "score": score,        # 最终点数（只有 tooltip 用得到）
     })
-    print(f"  {tag}: {len(moves)} 手解读, rating {index[-1]['rating']}")
+    print(f"  {tag}: {len(moves)} 手解读, rating {index[-1]['rating']}"
+          + (f", {place} 位 {score} 点" if place else ""))
 
 index.sort(key=lambda x: x["tag"])
 tmp = OUT / ".index.json.tmp"

@@ -87,7 +87,6 @@ EMPTY_CONFIG = {
     "chrome": "",
     "python": "",
     "node": "",
-    "show_browser": False,
     "bad": {"thresh": 0.10, "gap": {"severe": 0.50},
             "loss": {"severe": 0.70, "medium": 0.30}},
     "ui": {},
